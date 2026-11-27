@@ -1,0 +1,273 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Leonida Launcher</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body data-tab="home">
+
+<!-- Gulf coast at sunset, our own drawing. app.js adds the causeway, the light on the water and the
+     palms. Drawn once; only a slow transform on .pan moves it. -->
+<div class="stage" aria-hidden="true">
+  <div class="pan">
+    <svg class="scene" viewBox="0 0 1600 900" preserveAspectRatio="xMidYMid slice">
+      <defs>
+        <linearGradient id="sky" x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0" stop-color="#160a2e"/>
+          <stop offset="0.34" stop-color="#43155c"/>
+          <stop offset="0.62" stop-color="#9c2869"/>
+          <stop offset="0.84" stop-color="#e2504c"/>
+          <stop offset="1" stop-color="#ff9443"/>
+        </linearGradient>
+        <!-- The orange belongs to the sun: a wide glow round it, magenta away from it. -->
+        <radialGradient id="dusk" cx="1220" cy="470" r="620" gradientTransform="translate(0 235) scale(1 0.5)" gradientUnits="userSpaceOnUse">
+          <stop offset="0" stop-color="#ffc96e"/>
+          <stop offset="0.4" stop-color="#ff9443" stop-opacity="0.7"/>
+          <stop offset="1" stop-color="#ff9443" stop-opacity="0"/>
+        </radialGradient>
+        <linearGradient id="sea" x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0" stop-color="#8a3a5c"/>
+          <stop offset="0.1" stop-color="#4a1d52"/>
+          <stop offset="0.45" stop-color="#22113a"/>
+          <stop offset="1" stop-color="#0c0818"/>
+        </linearGradient>
+        <radialGradient id="sunHalo" cx="0.5" cy="0.5" r="0.5">
+          <stop offset="0" stop-color="#ffc070" stop-opacity="0.55"/>
+          <stop offset="1" stop-color="#ff7a5a" stop-opacity="0"/>
+        </radialGradient>
+        <linearGradient id="sun" x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0" stop-color="#fff3c4"/>
+          <stop offset="1" stop-color="#ffa94a"/>
+        </linearGradient>
+        <linearGradient id="sand" x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0" stop-color="#3a1a3a"/>
+          <stop offset="1" stop-color="#120a1a"/>
+        </linearGradient>
+      </defs>
+
+      <rect width="1600" height="470" fill="url(#sky)"/>
+      <rect width="1600" height="470" fill="url(#dusk)"/>
+      <!-- Two thin cloud bands lit from below. -->
+      <path fill="#ff7d6b" opacity="0.35" d="M760 300h300c40 0 60-8 120-8h240c30 0 40 6 80 6h100v6H920c-60 0-110 4-160-4z"/>
+      <path fill="#ffb07a" opacity="0.3" d="M980 360h180c30 0 50-6 90-6h170c20 0 30 4 60 4h120v5h-380c-90 0-160 3-240-3z"/>
+      <path fill="#c8306a" opacity="0.4" d="M0 230c200-12 470-12 760 0 40 3 20 10-40 11-260 6-540 4-720-11z"/>
+      <circle cx="1220" cy="468" r="210" fill="url(#sunHalo)"/>
+      <path d="M1146 470a74 74 0 0 1 148 0z" fill="url(#sun)"/>
+      <rect y="470" width="1600" height="430" fill="url(#sea)"/>
+      <!-- Far keys and stepped towers on the left shore. -->
+      <path fill="#2a1240" d="M0 470v-30h26v-22h18v-30h10v30h16v22h30v-58h8v-10h22v10h8v58h20v-34h36v34h14v-60l14-14 14 14v60h22v-30h40v30h30v-18h44v18h18v-40h12v-8h16v8h12v40h60v-6h34v6h22l18-8h60v8h30v-14h12v14h70l26-6h90l20 6h60v18z"/>
+      <path fill="#3a1748" d="M1400 470v-6h60l30-5h110v11z"/>
+      <g id="causeway"></g>
+      <g id="glints" fill="#ffc98a"></g>
+
+      <!-- A roadside motel sign in tube colours. The glow is painted, not a filter. -->
+      <g transform="translate(1290 352)">
+        <path fill="#0e0816" d="M-130 140c40-14 120-18 220-12 60 4 120 8 200 18v20h-420z"/>
+        <rect x="40" y="32" width="5" height="108" fill="#0e0816"/>
+        <rect x="-7" y="-9" width="102" height="44" fill="none" stroke="#ff4f9a" stroke-width="7" opacity="0.22"/>
+        <rect x="-4" y="-6" width="96" height="38" fill="#120a1c" stroke="#ff4f9a" stroke-width="2.4"/>
+        <text x="44" y="21" text-anchor="middle" class="sign-word" fill="#ffd1e6">MOTEL</text>
+        <path d="M8 46h60l12 9-12 9H8z" fill="none" stroke="#5ff2d6" stroke-width="6" opacity="0.2"/>
+        <path d="M8 46h60l12 9-12 9H8z" fill="#120a1c" stroke="#5ff2d6" stroke-width="2"/>
+        <text x="40" y="59.5" text-anchor="middle" class="sign-small" fill="#a8fff2">VACANCY</text>
+      </g>
+
+      <path fill="url(#sand)" d="M0 780c180-40 420-56 700-40 300 18 600 60 900 40v120H0z"/>
+      <g id="palms" fill="#0e0816"></g>
+    </svg>
+  </div>
+  <div class="shade"></div>
+  <div class="grain"></div>
+</div>
+
+<!-- Letterbox bars: the status line at the top, the key hints at the bottom. -->
+<header class="bar bar-top">
+  <p class="hdr">
+    <span class="hdr-clock" id="clock"></span>
+    <span class="hdr-mode" id="hdrMode"></span>
+    <span class="tube" id="tube" role="status" aria-label="Checking what's there"><span class="sq" aria-hidden="true"></span><span class="tube-word" id="tubeWord">CHECKING</span></span>
+  </p>
+</header>
+
+<div class="app" id="app">
+  <div class="brand">
+    <svg class="brand-mark" viewBox="0 0 32 32" aria-hidden="true">
+      <path d="M7.5 17.5a8.5 8.5 0 0 1 17 0z" fill="#ffb547"/>
+      <path d="M6.5 21.5h19M10 25.8h12" stroke="#5ff2d6" stroke-width="2.6"/>
+    </svg>
+    <span class="brand-word">LEONIDA</span>
+    <span class="brand-sub">Launcher</span>
+  </div>
+
+  <nav class="tabs" role="tablist" aria-label="Menu" id="tabs">
+    <button class="tab" type="button" role="tab" id="tab-home" data-tab="" aria-controls="home" aria-selected="true">Play</button>
+    <button class="tab" type="button" role="tab" id="tab-panel" data-tab="panel" aria-controls="panel" aria-selected="false" tabindex="-1">Settings</button>
+    <button class="tab" type="button" role="tab" id="tab-testPanel" data-tab="testPanel" aria-controls="testPanel" aria-selected="false" tabindex="-1">Test</button>
+    <button class="tab" type="button" role="tab" id="tab-about" data-tab="about" aria-controls="about" aria-selected="false" tabindex="-1">About</button>
+  </nav>
+
+  <main class="menu home" id="home" role="tabpanel" aria-labelledby="tab-home">
+    <section class="list" id="tiles" aria-label="Start">
+      <div class="mrow start blocked" id="playTile">
+        <button class="play-btn" type="button" id="playBtn">
+          <span class="start-text">
+            <span class="start-word">START</span>
+            <span class="play-foot" id="playFoot"></span>
+          </span>
+          <svg class="start-go" viewBox="0 0 44 44" aria-hidden="true"><path d="M14 8v28l22-14z" fill="currentColor"/></svg>
+        </button>
+      </div>
+      <p class="group-head">Before you play</p>
+      <button class="mrow" type="button" id="gameTile"></button>
+      <button class="mrow" type="button" id="leonidaTile"></button>
+      <button class="mrow" type="button" id="warmTile"></button>
+      <p class="group-head">More</p>
+      <button class="mrow" type="button" id="modeTile" aria-controls="panel" aria-expanded="false"></button>
+      <button class="mrow" type="button" id="testTile" aria-controls="testPanel" aria-expanded="false"></button>
+    </section>
+    <section class="detail hero" id="hero"></section>
+  </main>
+
+  <section class="menu panel" id="panel" role="tabpanel" aria-labelledby="tab-panel" hidden>
+    <div class="list panel-body" id="panelBody">
+      <p class="group-head" id="panelTitle">Who picks the settings</p>
+      <div class="modes" role="radiogroup" aria-labelledby="panelTitle">
+        <label class="mode">
+          <input type="radio" name="mode" value="recommended">
+          <span class="mode-text">
+            <strong>Recommended</strong>
+            <span>Leonida picks for your graphics card.</span>
+          </span>
+        </label>
+        <label class="mode">
+          <input type="radio" name="mode" value="advanced">
+          <span class="mode-text">
+            <strong>My own choices</strong>
+            <span>Profiles and switches you pick.</span>
+          </span>
+        </label>
+      </div>
+
+      <details class="advanced" id="advanced">
+        <summary>
+          <span class="adv-title">Advanced</span>
+          <span class="pill" id="advCount"></span>
+          <svg class="chev" viewBox="0 0 16 16" aria-hidden="true"><path d="M2.5 5.5 8 11l5.5-5.5" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="square"/></svg>
+        </summary>
+        <p class="unused" id="unused">Not used while Recommended is on. You can still change things here; picking anything switches to your own choices.</p>
+
+        <div class="adv-body" id="advBody">
+          <section class="group">
+            <div class="group-head">
+              <h3>Profiles</h3>
+              <button type="button" class="link-btn" id="clearProfiles" hidden>Use the card's picks</button>
+            </div>
+            <p class="muted" id="profilesHint"></p>
+            <div id="profileGroups"></div>
+          </section>
+
+          <section class="group">
+            <div class="group-head">
+              <h3>Switches</h3>
+              <span class="source" id="source"><span class="dot"></span><span id="sourceLabel">Built-in list</span></span>
+              <button type="button" class="link-btn" id="refresh">Refresh</button>
+            </div>
+            <p class="muted">Each switch changes one thing for the next start. <b>Default</b> keeps what the profiles set. Every name starts with LEONIDA_. Left and right change a value; Enter opens the full list.</p>
+            <div class="rows" id="mainSwitches"></div>
+            <details class="sub" id="testBuilds">
+              <summary><span id="testBuildsTitle">Test builds</span>
+                <svg class="chev" viewBox="0 0 16 16" aria-hidden="true"><path d="M2.5 5.5 8 11l5.5-5.5" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="square"/></svg>
+              </summary>
+              <p class="muted">These need a branch build of Leonida Legacy. A normal build ignores them.</p>
+              <div class="rows" id="testSwitches"></div>
+            </details>
+          </section>
+        </div>
+      </details>
+    </div>
+
+    <aside class="detail">
+      <h2>Picture and speed</h2>
+      <p class="lead">Changes save by themselves and count from the next start.</p>
+
+      <section class="group">
+        <h3><label for="extra">Extra lines</label></h3>
+        <p class="muted">For switches that aren't in the list. One NAME=value per line. A line that starts with # is a note.</p>
+        <textarea id="extra" class="well" rows="3" spellcheck="false" placeholder="NAME=value, one per line"></textarea>
+      </section>
+
+      <section class="group">
+        <div class="group-head">
+          <h3>Run command</h3>
+          <button type="button" class="btn btn-small btn-ghost" id="copyCmd">Copy</button>
+        </div>
+        <p class="muted">What START runs, as PowerShell. Paste it into a test report.</p>
+        <pre class="well cmd" id="runCmd" tabindex="0" aria-label="Run command"></pre>
+      </section>
+
+      <section class="group reset">
+        <button type="button" class="link-btn" id="resetAll">Reset to recommended</button>
+        <p class="confirm" id="confirmReset" hidden>
+          <span id="confirmText"></span>
+          <button type="button" class="btn btn-small btn-warm" id="doReset">Clear them</button>
+          <button type="button" class="btn btn-small btn-ghost" id="keepAll">Keep them</button>
+        </p>
+      </section>
+    </aside>
+  </section>
+
+  <section class="menu panel test" id="testPanel" role="tabpanel" aria-labelledby="tab-testPanel" hidden>
+    <div class="list test-main">
+      <ol class="t-steps" id="testSteps" aria-label="Steps"></ol>
+      <div class="panel-body" id="testBody" aria-live="polite"></div>
+    </div>
+    <aside class="detail" id="testSide"></aside>
+  </section>
+
+  <section class="menu about" id="about" role="tabpanel" aria-labelledby="tab-about" hidden>
+    <div class="list">
+      <p class="group-head">Leonida Legacy</p>
+      <div class="arow"><span class="arow-k">What it does</span><span class="arow-v">Runs the Xbox Series build of the game natively on Windows, from your own copy.</span></div>
+      <div class="arow"><span class="arow-k">Your game stays yours</span><span class="arow-v">The launcher reads your own install and never copies it anywhere. The game never needs the internet.</span></div>
+      <div class="arow"><span class="arow-k">Build steps</span><span class="arow-v"><button type="button" class="link-btn" data-act="buildSteps" data-key="aboutBuild">Open the build steps</button></span></div>
+      <p class="group-head">Credits</p>
+      <div class="arow"><span class="arow-k">Forked from</span><span class="arow-v"><button type="button" class="link-btn" data-act="creditFork" data-key="creditFork">fxceless/victory-gta6</button>, itself a fork of <button type="button" class="link-btn" data-act="creditVictory" data-key="creditVictory">Marvisak/VIctory</button></span></div>
+      <div class="arow"><span class="arow-k">Licence</span><span class="arow-v">Leonida Legacy is GPL-3.0-or-later</span></div>
+      <div class="arow"><span class="arow-k">Fonts</span><span class="arow-v">Anton and Barlow Condensed, SIL Open Font License, in the fonts folder</span></div>
+    </div>
+    <aside class="detail">
+      <h2>About</h2>
+      <p class="lead">The launcher finds your game and Leonida Legacy, keeps your settings and starts the game with them.</p>
+      <p>All art here is drawn by the project in SVG and CSS. Nothing in it comes from the game.</p>
+      <p>Testing a setting shares only figures and your own words, and only when you paste the report yourself.</p>
+    </aside>
+  </section>
+</div>
+
+<footer class="bar bar-bottom">
+  <p class="bar-source" id="barSource"></p>
+  <p class="start-line" id="startLine" role="status"></p>
+  <!-- The keys work by themselves; these say which, and do the same when clicked. -->
+  <p class="hints" id="hints" aria-hidden="true">
+    <button class="hint" type="button" tabindex="-1" id="hintMove" data-hint="move"><kbd><svg viewBox="0 0 16 16"><path d="M2.5 10.5 8 5l5.5 5.5" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="square"/></svg></kbd><kbd><svg viewBox="0 0 16 16"><path d="M2.5 5.5 8 11l5.5-5.5" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="square"/></svg></kbd>Move</button>
+    <button class="hint" type="button" tabindex="-1" id="hintChange" data-hint="change" hidden><kbd><svg viewBox="0 0 16 16"><path d="M10.5 2.5 5 8l5.5 5.5" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="square"/></svg></kbd><kbd><svg viewBox="0 0 16 16"><path d="M5.5 2.5 11 8l-5.5 5.5" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="square"/></svg></kbd>Change</button>
+    <button class="hint" type="button" tabindex="-1" id="hintSelect" data-hint="select"><kbd>Enter</kbd><span id="hintSelectWord">Select</span></button>
+    <button class="hint" type="button" tabindex="-1" id="hintBack" data-hint="back"><kbd>Esc</kbd>Back</button>
+    <button class="hint hint-tabs" type="button" tabindex="-1" id="hintTabs" data-hint="tabs"><kbd>Q</kbd><kbd>E</kbd>Tabs</button>
+  </p>
+  <svg class="spinner big" viewBox="0 0 40 40" aria-hidden="true">
+    <circle cx="20" cy="20" r="15" fill="none" stroke="rgba(255,255,255,.18)" stroke-width="4"/>
+    <path d="M20 5a15 15 0 0 1 15 15" fill="none" stroke="#f5f0e8" stroke-width="4" stroke-linecap="square"/>
+  </svg>
+</footer>
+
+<div class="toasts" id="toasts" aria-live="polite"></div>
+
+<!-- The one open list of every value selector, outside the lists so nothing clips it. -->
+<ul class="dd-list" id="ddList" role="listbox" tabindex="-1" hidden></ul>
+
+<script src="app.js"></script>
+</body>
+</html>

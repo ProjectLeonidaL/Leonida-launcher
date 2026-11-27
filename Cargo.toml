@@ -1,13 +1,22 @@
 [package]
 name = "leonida-launcher"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
 [dependencies]
-eframe = { version = "0.37.0", default-features = false, features = ["default_fonts", "glow", "accesskit"] }
+tauri = { version = "2", features = [] }
 rfd = "0.18.0"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
+
+# A plain `cargo build --release` serves the window from ui\ inside the .exe. Without
+# custom-protocol, Tauri would load its dev server address and show an empty window.
+[features]
+default = ["custom-protocol"]
+custom-protocol = ["tauri/custom-protocol"]
 
 [profile.release]
 opt-level = "s"

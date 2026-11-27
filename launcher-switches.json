@@ -1,86 +1,135 @@
 {
   "about": [
     "Switches the Leonida Launcher offers as drop-downs. The launcher downloads this file from the main branch, so a new switch shows up without a launcher release.",
-    "name: the switch without LEONIDA_. values: the choices besides default (default sets nothing). about: shown on hover. build: the branch a switch needs while it is not on main, empty once merged."
+    "name: the switch without LEONIDA_. values: the choices besides default (default sets nothing). title: the switch in plain words, shown above its name. about: shown under it, in words for someone who doesn't code: what they would notice and when to change it. risk: safe, experimental or may crash, only when a measurement shows it; leave it empty otherwise. build: the branch a switch needs while it is not on main, empty once merged.",
+    "title and risk are new; launchers older than them ignore both.",
+    "test: speed or crash, the guided test a switch suits in Test a setting. speed compares two short runs; crash checks whether turning a switch off stops a game that keeps stopping. Without test, the switch isn't offered there. default: the value Leonida uses when the switch isn't set, when that is also in values; Test a setting doesn't offer it.",
+    "wanted: tests the maintainers ask for, first fitting one first. switch or profile names what (a profile from gpu-profiles.json), value which value, match the cards in gpu-profiles.json's form (empty: every card), why one sentence shown to the player. Launchers older than these fields ignore them."
+  ],
+  "wanted": [
+    {
+      "profile": "nvidia-8gb",
+      "match": { "vendor": "nvidia", "min_vram_mb": 7000, "max_vram_mb": 8600 },
+      "why": "Measured on one RTX 3060 Ti so far. Does it help other 8 GB NVIDIA cards too?"
+    }
   ],
   "switches": [
     {
       "name": "DLSS",
+      "title": "DLSS upscaling (NVIDIA RTX)",
       "values": ["quality", "balanced", "performance", "dlaa", "off"],
-      "about": "NVIDIA DLSS upscaling on RTX cards. Needs the DLSS files from scripts\\get-nvidia-dlss.ps1.",
-      "build": "feat/dlss-sr"
+      "about": "On NVIDIA RTX cards, draws the picture smaller and scales it up, for more frames a second. Quality looks best, Performance is fastest, DLAA keeps the full size and only smooths edges. Needs the DLSS files: run scripts\\get-nvidia-dlss.ps1 in your Leonida Legacy folder once.",
+      "risk": "",
+      "build": "feat/dlss-sr",
+      "test": "speed"
     },
     {
       "name": "THIN",
+      "title": "Prepare frames on more threads",
       "values": ["1"],
-      "about": "Thinner work in the submit queue line.",
-      "build": "perf/thin-line"
+      "about": "Leonida translates the game's drawing commands on several threads of its own instead of one. Not measured yet: compare the frame rate with and without it.",
+      "risk": "",
+      "build": "perf/thin-line",
+      "test": "speed"
     },
     {
       "name": "WC_NO_BACK",
+      "title": "Skip copying big buffers back",
       "values": ["1"],
-      "about": "Skips copying large write-combined buffers back to the CPU.",
-      "build": "perf/wc-no-back"
+      "about": "Stops copying large blocks of graphics memory back every frame, which costs a lot of time. In its one test run so far (an RTX 3080, 27 November 2026) the game lost the graphics card before the 600th frame, so expect it to stop.",
+      "risk": "may crash",
+      "build": "perf/wc-no-back",
+      "test": "speed"
     },
     {
       "name": "WAVE_MORE_SKIPS",
+      "title": "Try to fix dark diamonds on water",
       "values": ["1"],
-      "about": "More branch skips in 32-lane shaders, a try at the dark water diamonds. Warm up shaders after changing it.",
+      "about": "Translates some shadow shaders differently, as a try at the dark diamond-shaped patches on water. Run Warm up shaders after changing it, or the next game stutters while it translates them again.",
+      "risk": "",
       "build": "fix/cascade-wave32"
     },
     {
       "name": "TEXTURE_STAGE_MB",
+      "title": "Textures sent to the card each frame",
       "values": ["192", "512", "1024"],
-      "about": "Texture staging size in MB. 8 GB cards: try 512.",
-      "build": ""
+      "about": "How many MB of textures Leonida sends to the graphics card each frame (192 when left on Default). More lets a new area's textures arrive in fewer frames, so blurry or missing textures fill in sooner. On 8 GB cards, try 512.",
+      "risk": "",
+      "build": "",
+      "default": "192",
+      "test": "speed"
     },
     {
       "name": "ASYNC_SUBMIT",
+      "title": "Send frames from a helper thread",
       "values": ["0"],
-      "about": "On through the base profile. 0 turns it off for this run.",
-      "build": ""
+      "about": "The game no longer waits while Leonida hands each frame to the graphics card. On by default because it made frames faster on every card tested. Turn it off only to check whether it is behind a crash or a frozen game.",
+      "risk": "",
+      "build": "",
+      "test": "crash"
     },
     {
       "name": "QUEUE2",
+      "title": "Copy results back on a second lane",
       "values": ["0"],
-      "about": "On through the base profile. 0 turns it off for this run.",
-      "build": ""
+      "about": "What the graphics card hands back is copied on a lane of its own, so drawing doesn't wait for it. On by default because it made frames faster on every card tested. Turn it off only if the game crashes or the picture breaks.",
+      "risk": "",
+      "build": "",
+      "test": "crash"
     },
     {
       "name": "INDIRECT_WINDOW",
+      "title": "Check draws in batches",
       "values": ["0"],
-      "about": "On through the base profile. 0 turns it off for this run.",
-      "build": ""
+      "about": "Leonida checks the game's draw requests in batches instead of one at a time. On by default because it made frames faster on every card tested, and Leonida turns it off by itself when the graphics driver reports an error. Turn it off here if the game keeps losing the graphics card.",
+      "risk": "",
+      "build": "",
+      "test": "crash"
     },
     {
       "name": "COPY_PLAIN",
+      "title": "Copy game memory directly",
       "values": ["0"],
-      "about": "On through the base profile. 0 turns it off for this run.",
-      "build": ""
+      "about": "Leonida copies the game's memory itself instead of asking Windows each time, which takes load off the processor. On by default because it made frames faster on every card tested. Turn it off only if the game crashes.",
+      "risk": "",
+      "build": "",
+      "test": "crash"
     },
     {
       "name": "JOIN_PARTS",
+      "title": "Send each frame in fewer pieces",
       "values": ["0"],
-      "about": "On through the base profile. 0 turns it off for this run.",
-      "build": ""
+      "about": "Pieces of a frame that follow one another go to the graphics card together, still in the same order. On by default, about 6% faster where it was measured. Turn it off only if the game crashes or the picture breaks.",
+      "risk": "",
+      "build": "",
+      "test": "crash"
     },
     {
       "name": "BACK_OWN_VIEW",
+      "title": "Don't read results in twice",
       "values": ["0"],
-      "about": "On through the base profile. 0 turns it off for this run.",
-      "build": ""
+      "about": "What the graphics card drew goes back to the game without being read in a second time. On by default, about 9% faster where it was measured. Turn it off only if the game crashes or the picture breaks.",
+      "risk": "",
+      "build": "",
+      "test": "crash"
     },
     {
       "name": "INDIRECT_GATHER",
+      "title": "Check stray draws together",
       "values": ["0"],
-      "about": "On through the base profile. 0 turns it off for this run.",
-      "build": ""
+      "about": "Draw requests that don't fit a batch are checked together in one pass instead of one by one. On by default because it made frames faster on every card tested. Turn it off only if the game crashes or the picture breaks.",
+      "risk": "",
+      "build": "",
+      "test": "crash"
     },
     {
       "name": "CARD_REHASH_RUNS",
+      "title": "Fewer checking passes on the card",
       "values": ["0"],
-      "about": "On through the base profile. 0 turns it off for this run.",
-      "build": ""
+      "about": "Leonida's own checks on the graphics card run once per group of neighbouring pieces instead of once per piece sent. On by default because it made frames faster on every card tested. Turn it off only if the game crashes or the picture breaks.",
+      "risk": "",
+      "build": "",
+      "test": "crash"
     }
   ]
 }
