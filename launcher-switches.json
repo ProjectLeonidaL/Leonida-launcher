@@ -1,0 +1,86 @@
+{
+  "about": [
+    "Switches the Leonida Launcher offers as drop-downs. The launcher downloads this file from the main branch, so a new switch shows up without a launcher release.",
+    "name: the switch without LEONIDA_. values: the choices besides default (default sets nothing). about: shown on hover. build: the branch a switch needs while it is not on main, empty once merged."
+  ],
+  "switches": [
+    {
+      "name": "DLSS",
+      "values": ["quality", "balanced", "performance", "dlaa", "off"],
+      "about": "NVIDIA DLSS upscaling on RTX cards. Needs the DLSS files from scripts\\get-nvidia-dlss.ps1.",
+      "build": "feat/dlss-sr"
+    },
+    {
+      "name": "THIN",
+      "values": ["1"],
+      "about": "Thinner work in the submit queue line.",
+      "build": "perf/thin-line"
+    },
+    {
+      "name": "WC_NO_BACK",
+      "values": ["1"],
+      "about": "Skips copying large write-combined buffers back to the CPU.",
+      "build": "perf/wc-no-back"
+    },
+    {
+      "name": "WAVE_MORE_SKIPS",
+      "values": ["1"],
+      "about": "More branch skips in 32-lane shaders, a try at the dark water diamonds. Warm up shaders after changing it.",
+      "build": "fix/cascade-wave32"
+    },
+    {
+      "name": "TEXTURE_STAGE_MB",
+      "values": ["192", "512", "1024"],
+      "about": "Texture staging size in MB. 8 GB cards: try 512.",
+      "build": ""
+    },
+    {
+      "name": "ASYNC_SUBMIT",
+      "values": ["0"],
+      "about": "On through the base profile. 0 turns it off for this run.",
+      "build": ""
+    },
+    {
+      "name": "QUEUE2",
+      "values": ["0"],
+      "about": "On through the base profile. 0 turns it off for this run.",
+      "build": ""
+    },
+    {
+      "name": "INDIRECT_WINDOW",
+      "values": ["0"],
+      "about": "On through the base profile. 0 turns it off for this run.",
+      "build": ""
+    },
+    {
+      "name": "COPY_PLAIN",
+      "values": ["0"],
+      "about": "On through the base profile. 0 turns it off for this run.",
+      "build": ""
+    },
+    {
+      "name": "JOIN_PARTS",
+      "values": ["0"],
+      "about": "On through the base profile. 0 turns it off for this run.",
+      "build": ""
+    },
+    {
+      "name": "BACK_OWN_VIEW",
+      "values": ["0"],
+      "about": "On through the base profile. 0 turns it off for this run.",
+      "build": ""
+    },
+    {
+      "name": "INDIRECT_GATHER",
+      "values": ["0"],
+      "about": "On through the base profile. 0 turns it off for this run.",
+      "build": ""
+    },
+    {
+      "name": "CARD_REHASH_RUNS",
+      "values": ["0"],
+      "about": "On through the base profile. 0 turns it off for this run.",
+      "build": ""
+    }
+  ]
+}
