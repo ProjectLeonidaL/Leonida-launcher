@@ -29,9 +29,19 @@ jobs:
     runs-on: windows-latest
     timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v5
+      # Actions are pinned to full commits: a moved tag can't change what builds the exe.
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
           persist-credentials: false
+          fetch-depth: 0
+      # Only a commit that is on main becomes a release that every launcher may install.
+      - name: Check that the tagged commit is on main
+        if: github.event_name == 'push'
+        shell: pwsh
+        run: |
+          git merge-base --is-ancestor $env:GITHUB_SHA origin/main
+          if ($LASTEXITCODE -ne 0) { throw "$env:GITHUB_SHA is not on main: tag a commit on main" }
+          "$env:GITHUB_SHA is on main"
       - name: Check that the tag matches Cargo.toml
         if: github.event_name == 'push'
         shell: pwsh
@@ -50,7 +60,9 @@ jobs:
           "Cargo.toml version $version matches $env:TAG"
       # The repository pins no toolchain: build with the current stable.
       - run: rustup toolchain install stable --profile minimal
-      - uses: Swatinem/rust-cache@v2
+      # A release builds from scratch: nothing restored from a cache goes into the exe.
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        if: github.event_name != 'push'
       # tauri-build links the C runtime in by default, so the exe also starts on a PC without
       # the Visual C++ Redistributable.
       - name: Build
@@ -82,7 +94,7 @@ jobs:
           $hex = (Get-FileHash -Algorithm SHA256 $exe).Hash.ToLowerInvariant()
           [IO.File]::WriteAllText("$exe.sha256", "$hex  leonida-launcher.exe`n")
           Get-Content "$exe.sha256"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: leonida-launcher
           path: |
@@ -102,7 +114,7 @@ jobs:
       GH_TOKEN: ${{ github.token }}
       TAG: ${{ github.ref_name }}
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: leonida-launcher
       - name: Publish
@@ -132,6 +144,21 @@ jobs:
             'Windows 10). Windows may warn that the file is not signed: More info, then Run',
             'anyway. leonida-launcher.exe.sha256 holds its SHA-256.'
           ) -join "`n"
-          gh release create $env:TAG @files --repo $repo --verify-tag `
+          # Launchers update to releases/latest, so only the highest version may be it: a hotfix
+          # tagged on an older line must not take its place. A pre-release never is.
+          $mine = $null
+          $flags = @('--latest=false')
+          if ([version]::TryParse($version, [ref]$mine)) {
+            $tags = @(gh release list --repo $repo --exclude-drafts --limit 200 `
+              --json tagName --jq '.[].tagName')
+            if ($LASTEXITCODE -ne 0) { throw 'gh release list failed' }
+            $higher = @($tags | Where-Object { $_ -match '^v\d+(\.\d+){1,3}$' } |
+              Where-Object { [version]$_.Substring(1) -gt $mine })
+            if ($higher.Count -eq 0) { $flags = @('--latest') }
+            else { "Not marked latest: $($higher -join ', ') is higher" }
+          } else {
+            $flags += '--prerelease'
+          }
+          gh release create $env:TAG @files --repo $repo --verify-tag @flags `
             --title "Leonida Launcher $version" --notes $notes
           if ($LASTEXITCODE -ne 0) { throw 'gh release create failed' }
