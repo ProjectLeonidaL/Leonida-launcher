@@ -63,8 +63,8 @@ jobs:
       # A release builds from scratch: nothing restored from a cache goes into the exe.
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         if: github.event_name != 'push'
-      # tauri-build links the C runtime in by default, so the exe also starts on a PC without
-      # the Visual C++ Redistributable.
+      # tauri-build links the Visual C++ runtime in, so the exe starts without the Redistributable.
+      # The Universal C runtime (api-ms-win-crt-*) is part of Windows 10 and later.
       - name: Build
         run: cargo +stable build --release --locked
       # The release holds the exe alone, so it must not need a DLL that only sits next to it in
@@ -80,7 +80,7 @@ jobs:
           $deps = & $dumpbin.FullName /nologo /dependents target\release\leonida-launcher.exe
           if ($LASTEXITCODE -ne 0) { throw 'dumpbin failed' }
           $bad = @($deps | Where-Object {
-            $_ -match '(?i)vcruntime|msvcp|api-ms-win-crt|webview2loader'
+            $_ -match '(?i)vcruntime|msvcp|webview2loader'
           })
           if ($bad.Count -gt 0) { throw "leonida-launcher.exe imports $(($bad.Trim()) -join ', ')" }
           $deps
