@@ -351,6 +351,22 @@ kbd svg { width: 13px; height: 13px; }
   25% { box-shadow: inset 0 0 0 4px var(--amber); }
 }
 
+/* An update that is out: amber, so it is seen without being in the way. */
+.mrow.news { background: rgba(255, 181, 71, 0.14); }
+.mrow.news::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 7px;
+  bottom: 7px;
+  width: 5px;
+  background: var(--amber);
+}
+.mrow.news .label { color: var(--amber); font-weight: 800; letter-spacing: 0.03em; }
+.mrow.news.hl { background: var(--paper); }
+.mrow.news.hl::before { background: var(--amber-ink); }
+.mrow.news.hl .label { color: var(--amber-ink); }
+
 /* START: the one big row. */
 .mrow.start { display: block; min-height: 84px; margin-bottom: 8px; padding: 0; background: rgba(200, 48, 106, 0.28); }
 .play-btn {
@@ -912,6 +928,7 @@ textarea.well:focus, .t-input:focus { outline: 2px solid var(--teal); outline-of
 }
 .arow-k { font: 600 20px/1.1 var(--cond); }
 .arow-v { color: var(--soft); font-size: 14px; line-height: 1.4; user-select: text; }
+.arow-note { display: block; margin-top: 4px; color: var(--dim); }
 
 /* ---------- Help boxes, top left under the bar ---------- */
 

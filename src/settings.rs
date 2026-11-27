@@ -18,6 +18,12 @@ pub struct Settings {
     /// Whether the profiles, switches and extra lines are sent (My own choices) or kept but
     /// left out (Recommended). None in settings saved before the choice existed.
     pub advanced: Option<bool>,
+    /// The launcher version the player answered Later to; a newer one shows again.
+    pub later_launcher: String,
+    /// The same for Leonida's ready-made builds.
+    pub later_build: u64,
+    /// The leonida.exe in use before the last ready-made build was installed, for going back.
+    pub previous_leonida: String,
 }
 
 impl Settings {

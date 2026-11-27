@@ -119,6 +119,8 @@
           <svg class="start-go" viewBox="0 0 44 44" aria-hidden="true"><path d="M14 8v28l22-14z" fill="currentColor"/></svg>
         </button>
       </div>
+      <button class="mrow news" type="button" id="launcherNews" hidden></button>
+      <button class="mrow news" type="button" id="buildNews" hidden></button>
       <p class="group-head">Before you play</p>
       <button class="mrow" type="button" id="gameTile"></button>
       <button class="mrow" type="button" id="leonidaTile"></button>
@@ -232,6 +234,11 @@
       <div class="arow"><span class="arow-k">What it does</span><span class="arow-v">Runs the Xbox Series build of the game natively on Windows, from your own copy.</span></div>
       <div class="arow"><span class="arow-k">Your game stays yours</span><span class="arow-v">The launcher reads your own install and never copies it anywhere. The game never needs the internet.</span></div>
       <div class="arow"><span class="arow-k">Build steps</span><span class="arow-v"><button type="button" class="link-btn" data-act="buildSteps" data-key="aboutBuild">Open the build steps</button></span></div>
+      <p class="group-head">Updates</p>
+      <div class="arow"><span class="arow-k">Launcher</span><span class="arow-v" id="aboutLauncher"></span></div>
+      <div class="arow"><span class="arow-k">Leonida build in use</span><span class="arow-v" id="aboutHave"></span></div>
+      <div class="arow"><span class="arow-k">Ready-made builds</span><span class="arow-v" id="aboutReady"></span></div>
+      <div class="arow"><span class="arow-k">Last check</span><span class="arow-v" id="aboutChecked"></span></div>
       <p class="group-head">Credits</p>
       <div class="arow"><span class="arow-k">Forked from</span><span class="arow-v"><button type="button" class="link-btn" data-act="creditFork" data-key="creditFork">fxceless/victory-gta6</button>, itself a fork of <button type="button" class="link-btn" data-act="creditVictory" data-key="creditVictory">Marvisak/VIctory</button></span></div>
       <div class="arow"><span class="arow-k">Licence</span><span class="arow-v">Leonida Legacy is GPL-3.0-or-later</span></div>
@@ -240,6 +247,7 @@
     <aside class="detail">
       <h2>About</h2>
       <p class="lead">The launcher finds your game and Leonida Legacy, keeps your settings and starts the game with them.</p>
+      <p>It looks on GitHub for a newer launcher and newer Leonida builds once an hour while it's open, and installs nothing you didn't ask for.</p>
       <p>All art here is drawn by the project in SVG and CSS. Nothing in it comes from the game.</p>
       <p>Testing a setting shares only figures and your own words, and only when you paste the report yourself.</p>
     </aside>

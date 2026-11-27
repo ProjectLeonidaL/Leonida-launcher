@@ -170,6 +170,7 @@ mod tests {
             switches: [("QUEUE2".to_string(), "0".to_string())].into(),
             extra: "# a note\nLEONIDA_HEAP_WORKER = 1\nnot a line".into(),
             advanced: Some(advanced),
+            ..Settings::default()
         }
     }
 

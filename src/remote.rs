@@ -188,7 +188,7 @@ fn cache(file: &str) -> Option<PathBuf> {
 
 /// What curl's exit code and its output (the body, a line break and the HTTP status from
 /// `--write-out`) mean.
-fn classify(exit: Option<i32>, stdout: &[u8]) -> Result<String, Miss> {
+pub fn classify(exit: Option<i32>, stdout: &[u8]) -> Result<String, Miss> {
     match exit {
         Some(0) => {}
         // 52, 55, 56: an empty reply or a dropped send or receive, as on bad Wi-Fi or with

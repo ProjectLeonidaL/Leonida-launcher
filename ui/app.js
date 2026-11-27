@@ -31,6 +31,7 @@ const ui = {
   panel: "", // the open tab: "" for Play, "panel", "testPanel" or "about"
   hl: "playTile", // the Play row the highlight bar is on
   startSeen: false, // Esc put the menu back while a start was still being shown
+  busy: "", // "check", "launcher", "leonida" or "checkout" while that update step runs
 };
 
 const ICON = {
@@ -150,6 +151,9 @@ function blocker() {
     return { tile: "gameTile", text: "Leonida needs the folder you installed the game to.", fix: "Find my game", act: "search" };
   }
   if (!V.has_exe) {
+    if (V.updates.game === "download") {
+      return { tile: "leonidaTile", text: "Leonida Legacy isn't on this PC yet.", fix: downloadLabel(), act: "installBuild" };
+    }
     return { tile: "leonidaTile", text: "Leonida Legacy isn't built yet, or the launcher can't find it.", fix: "Find leonida.exe", act: "findExe" };
   }
   if (testing()) {
@@ -161,10 +165,97 @@ function blocker() {
   return null;
 }
 
+/* ---------- Updates ---------- */
+
+const U = () => V.updates;
+/** A newer launcher the player hasn't answered Later to. */
+const launcherNews = () => !!(V && U().launcher_new && !U().launcher_later);
+/** A newer ready-made build than the one in use, not answered Later to. */
+const buildNews = () => !!(V && U().game === "behind" && !U().game_later);
+const downloadLabel = () => `Download Leonida (build ${U().newest}, ${U().newest_size})`;
+
+/** "Today at 21:40" or "26 Nov at 09:12" for a time in seconds since 1970. */
+function when(secs) {
+  const d = new Date(secs * 1000);
+  const time = d.toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" });
+  if (d.toDateString() === new Date().toDateString()) return `Today at ${time}`;
+  return `${d.toLocaleDateString("en-GB", { day: "numeric", month: "short" })} at ${time}`;
+}
+
+/** What a check found, in a sentence or two, for the toast after Check for updates now. */
+function updateSummary() {
+  const u = U();
+  if (u.note) return u.note;
+  const launcher = u.launcher_new ? `Launcher ${u.launcher_new} is out.` : "The launcher is up to date.";
+  const game = {
+    behind: `Leonida build ${u.newest} is out.`,
+    download: `Leonida build ${u.newest} is ready to download.`,
+    current: `You have build ${u.newest}, the newest Leonida build.`,
+    own: `The newest ready-made Leonida build is ${u.newest}.`,
+    old: `The newest ready-made Leonida build is ${u.newest}.`,
+    none: "No ready-made Leonida builds are published yet.",
+  }[u.game] || "";
+  return `${launcher} ${game}`.trim();
+}
+
+/** The ways to get a newer Leonida for the build in use, as buttons for the detail pane. */
+function buildActions(withPick) {
+  const u = U();
+  const busy = ui.busy ? " disabled" : "";
+  const getting = ui.busy === "leonida" ? "Downloading..." : "";
+  let html = "";
+  if (u.game === "behind") html += btn("installBuild", getting || `Update to build ${u.newest}`, "warm", busy);
+  if (u.game === "own" || u.game === "old") {
+    html += btn("installBuild", getting || "Use ready-made builds", "warm", busy) +
+      btn("updateCheckout", ui.busy === "checkout" ? "Asking..." : "Update my checkout", "ghost", busy);
+  }
+  if (withPick) html += btn("pickLeonida", "Pick another leonida.exe");
+  if (u.previous) html += link("usePrevious", `Use the previous build (${esc(u.previous)})`);
+  return html;
+}
+
+/** The update group under About: versions, what is out, and the last check. */
+function renderAbout() {
+  if (!V) return;
+  const u = U();
+  const a = (act, text) => `<button class="link-btn" type="button" data-act="${act}" data-key="about-${act}">${text}</button>`;
+  let launcher = esc(u.launcher);
+  if (u.launcher_new) {
+    launcher += `. Version ${esc(u.launcher_new)} is out: ` +
+      a("updateLauncher", ui.busy === "launcher" ? "Updating..." : "Update now") + " " + a("launcherPage", "What's new");
+  } else if (u.checked && !u.note) {
+    launcher += ", the newest";
+  }
+  setHTML($("aboutLauncher"), launcher);
+
+  let have = esc(V.has_exe ? u.have : "None yet");
+  if (u.game === "behind") have += `. Build ${u.newest} is out: ` + a("installBuild", ui.busy === "leonida" ? "Downloading..." : "Update");
+  if (u.game === "own" || u.game === "old") {
+    have += ". " + a("installBuild", "Use ready-made builds") + " or " + a("updateCheckout", "Update my checkout");
+  }
+  if (u.previous) have += `<span class="arow-note">${a("usePrevious", `Use the previous build (${esc(u.previous)})`)}</span>`;
+  if (u.warm) have += `<span class="arow-note">New build: warm up the shaders once before you play.</span>`;
+  setHTML($("aboutHave"), have);
+
+  const ready = u.game === "none" ? "No ready-made builds published yet"
+    : u.newest ? `Build ${u.newest} is the newest, ${esc(u.newest_size)}. ` + a("buildPage", "What's new")
+    : u.checking ? "Checking..." : "Not known yet. Check below.";
+  setHTML($("aboutReady"), ready);
+
+  const checking = u.checking || ui.busy === "check";
+  setHTML($("aboutChecked"),
+    (checking ? "Checking GitHub..." : u.checked ? esc(when(u.checked)) : "Not yet") +
+    ". " + a("checkNow", "Check for updates now") +
+    (u.note ? `<span class="arow-note">${esc(u.note)}</span>` : ""));
+}
+
 function heroState() {
   if (!V) return "loading";
   if (ui.hero === "leonida") return "leonida";
-  if (ui.hero === "game" || !V.has_game) return ui.found.length ? "pick" : "game";
+  if (ui.hero === "game") return ui.found.length ? "pick" : "game";
+  // An update row explains itself in the pane while the highlight bar is on it.
+  if ((ui.hl === "launcherNews" && launcherNews()) || (ui.hl === "buildNews" && buildNews())) return ui.hl;
+  if (!V.has_game) return ui.found.length ? "pick" : "game";
   if (!V.has_exe) return "leonida";
   if (ui.running) return "running";
   // Otherwise the detail pane explains the row the highlight bar is on, as a pause menu does.
@@ -267,6 +358,16 @@ function renderHero() {
       btn("pickFolder", "Pick the folder") +
       link("pickExe", "Pick the game's .exe instead") +
       (V.has_game ? link("keep", "Keep the current folder") : "");
+  } else if (state === "leonida" && !V.has_exe && U().game === "download") {
+    title = "Get Leonida Legacy";
+    text = "Download the newest ready-made build from GitHub. It needs nothing else installed and goes into the " +
+      "launcher's own folder. If you build Leonida Legacy yourself, find or pick your leonida.exe instead.";
+    actions =
+      btn("installBuild", ui.busy === "leonida" ? "Downloading..." : downloadLabel(), "warm", ui.busy ? " disabled" : "") +
+      btn("findExe", ui.findingExe ? "Looking..." : "Find my own build", "ghost", ui.findingExe ? " disabled" : "") +
+      btn("pickLeonida", "Pick leonida.exe") +
+      link("buildSteps", "Open the build steps") +
+      (U().previous ? link("usePrevious", `Use the previous build (${esc(U().previous)})`) : "");
   } else if (state === "leonida") {
     title = V.has_exe ? "Change leonida.exe" : "Find Leonida Legacy";
     textHtml = "The launcher needs leonida.exe, which you get by building Leonida Legacy once. " +
@@ -276,17 +377,49 @@ function renderHero() {
       btn("pickLeonida", "Pick leonida.exe") +
       link("buildSteps", "Open the build steps") +
       (V.has_exe ? link("keep", "Keep the current one") : "");
+    if (V.has_exe) actions += buildActions(false);
+  } else if (state === "launcherNews") {
+    const u = U();
+    title = `Launcher ${u.launcher_new} is out`;
+    text = `You have ${u.launcher}. Update now downloads the new launcher from GitHub, checks it against its ` +
+      "checksum, puts it in place of this one and starts it again. Your settings stay. Later hides this until a newer one comes out.";
+    actions =
+      btn("updateLauncher", ui.busy === "launcher" ? "Updating..." : "Update now", "warm", ui.busy ? " disabled" : "") +
+      btn("laterLauncher", "Later") +
+      link("launcherPage", "What's new");
+    facts = [["You have", u.launcher], ["Newest", u.launcher_new]];
+  } else if (state === "buildNews") {
+    const u = U();
+    title = `Leonida build ${u.newest} is out`;
+    text = `You have build ${u.have_build}. Newer builds bring fixes, often for speed too. Update downloads build ` +
+      `${u.newest} (${u.newest_size}) from GitHub and switches to it. Build ${u.have_build} stays, so you can go back. ` +
+      "Later hides this until a newer build comes out.";
+    actions =
+      btn("installBuild", ui.busy === "leonida" ? "Downloading..." : "Update", "warm", ui.busy ? " disabled" : "") +
+      btn("laterBuild", "Later") +
+      link("buildPage", "What's new");
+    facts = [["You have", `Build ${u.have_build}`], ["Newest", `Build ${u.newest}`]];
   } else if (state === "gameInfo") {
     title = "Game folder";
     text = "The folder you installed the game to, with MicrosoftGame.config inside. Press Enter to change it.";
     facts = [["Game", V.game_name || leaf(V.game_dir)], ["Folder", V.game_dir]];
   } else if (state === "exeInfo") {
+    const u = U();
     title = "Leonida Legacy";
-    text = "The leonida.exe you built. START runs it with your settings. Press Enter to pick another one.";
-    facts = [["Program", V.leonida_exe], ["Folder", V.checkout]];
+    text = {
+      behind: `Build ${u.have_build}. Build ${u.newest} is out. START runs the build you have until you update.`,
+      own: `Your own build, from your checkout. The newest ready-made build is ${u.newest}. Switch to the ready-made ` +
+        "builds, or update your checkout to the newest code.",
+      old: `A build from before build numbers. The newest ready-made build is ${u.newest}. Switch to the ready-made ` +
+        "builds, or update your checkout to the newest code.",
+      current: `Build ${u.have_build}, the newest. START runs it with your settings.`,
+    }[u.game] || "The leonida.exe START runs with your settings. Press Enter to pick another one.";
+    facts = [["Build", u.have], ["Program", V.leonida_exe], ["Folder", V.checkout]];
+    actions = buildActions(true);
   } else if (state === "warm") {
     title = "Warm up shaders";
-    text = "Translates the game's shaders ahead of time, so play doesn't stutter while that happens. " +
+    text = (U().warm ? "You switched to a new build: warm up once before you play, as its shaders are translated again. " : "") +
+      "Translates the game's shaders ahead of time, so play doesn't stutter while that happens. " +
       "Do it once before your first game, after each new Leonida build and after changing a shader switch.";
     facts = [["Takes", "A few minutes, in a new window"], ["Now", warmBlock() || "Press Enter to start it"]];
   } else if (state === "mode") {
@@ -368,16 +501,38 @@ function renderTiles() {
     ? V.game_name || leaf(V.game_dir)
     : V.game_dir ? "No MicrosoftGame.config there" : "Not found yet";
   stepTile("gameTile", 1, "Game folder", V.has_game, gameLine, V.game_dir || "Pick the folder you installed the game to");
+  const u = U();
+  const exeLine = {
+    behind: `Build ${u.have_build}. Build ${u.newest} is out`,
+    own: `Your own build. Newest ready-made: ${u.newest}`,
+    old: `An older build without a number. Newest ready-made: ${u.newest}`,
+    current: `Build ${u.have_build}, the newest`,
+  }[u.game] || `In ${leaf(V.checkout)}`;
   stepTile("leonidaTile", 2, "Leonida", V.has_exe,
-    V.has_exe ? `In ${leaf(V.checkout)}` : "leonida.exe not found",
+    V.has_exe ? exeLine : u.game === "download" ? `Not on this PC yet. Build ${u.newest} is ready to download` : "leonida.exe not found",
     V.leonida_exe || "Find or pick leonida.exe");
+
+  const launcherRow = $("launcherNews");
+  launcherRow.hidden = !launcherNews();
+  if (!launcherRow.hidden) {
+    menuRow("launcherNews", `LAUNCHER ${u.launcher_new} IS OUT`, `You have ${u.launcher}. Updating takes a few seconds.`,
+      ui.busy === "launcher" ? "Updating..." : "Update", "warn");
+  }
+  const buildRow = $("buildNews");
+  buildRow.hidden = !buildNews();
+  if (!buildRow.hidden) {
+    menuRow("buildNews", `LEONIDA BUILD ${u.newest} IS OUT`, `You have build ${u.have_build}. Download ${u.newest_size}.`,
+      ui.busy === "leonida" ? "Downloading..." : "Update", "warn");
+  }
 
   const warm = $("warmTile");
   const blocked = warmBlock();
   warm.setAttribute("aria-disabled", String(!!blocked));
   warm.setAttribute("aria-busy", String(ui.starting === "warm"));
-  const note = ui.starting === "warm" ? "Starting the warm-up..." : blocked || "Once before your first game. Takes a few minutes.";
+  const note = ui.starting === "warm" ? "Starting the warm-up..." : blocked ||
+    (u.warm ? "New build: warm up once before you play." : "Once before your first game. Takes a few minutes.");
   warm.classList.toggle("off", !!blocked);
+  warm.classList.toggle("changed", u.warm && !blocked);
   menuRow("warmTile", "Warm up shaders", note, blocked ? "Not now" : "Start");
 
   const own = V.advanced;
@@ -510,10 +665,13 @@ function render() {
   const active = document.activeElement;
   const key = active && active.dataset ? active.dataset.key : null;
   renderTube();
-  renderHero();
   renderPlay();
   renderTiles();
+  // A row that went away (an update answered Later, or done) hands the highlight back to START.
+  if ($(ui.hl).hidden) ui.hl = "playTile";
+  renderHero();
   renderPanel();
+  renderAbout();
   const moved = renderTest();
   renderBar();
   for (const row of document.querySelectorAll("#tiles .mrow")) row.classList.toggle("hl", row.id === ui.hl);
@@ -534,7 +692,8 @@ function render() {
 function toast(text, kind = "info") {
   const box = $("toasts");
   const el = document.createElement("div");
-  el.className = `toast ${kind}`;
+  // "keep" is an info toast that stays until it is closed, for steps the player must follow.
+  el.className = `toast ${kind === "keep" ? "info" : kind}`;
   if (kind === "problem") el.setAttribute("role", "alert");
   el.innerHTML = `<p>${esc(text)}</p><button type="button" aria-label="Close">${ICON.close}</button>`;
   box.prepend(el);
@@ -546,7 +705,7 @@ function toast(text, kind = "info") {
     setTimeout(() => el.remove(), reduced.matches ? 0 : 180);
   };
   el.querySelector("button").addEventListener("click", close);
-  if (kind === "problem") return;
+  if (kind === "problem" || kind === "keep") return;
   let left = 4000, since = Date.now();
   timer = setTimeout(close, left);
   el.addEventListener("mouseenter", () => {
@@ -1338,6 +1497,7 @@ async function findExe() {
   try {
     V = await invoke("find_leonida");
     doneChanging("Found leonida.exe");
+    checkUpdates(false);
   } catch (error) {
     ui.hero = "leonida";
     ui.problem = String(error);
@@ -1350,7 +1510,10 @@ async function pickLeonida() {
   try {
     const result = await invoke("pick_leonida");
     V = result.view;
-    if (result.picked) doneChanging("Using that leonida.exe");
+    if (result.picked) {
+      doneChanging("Using that leonida.exe");
+      checkUpdates(false);
+    }
   } catch (error) {
     ui.problem = String(error);
   }
@@ -1409,6 +1572,85 @@ async function refreshLists(asked) {
   }
   ui.listsLoading = false;
   render();
+}
+
+/** Asks the back end what is out, which asks GitHub at most once an hour unless the player asked.
+ *  Unasked, nothing is said: the rows and About show what there is. */
+async function checkUpdates(asked) {
+  if (!V || (asked && ui.busy)) return;
+  if (asked) {
+    ui.busy = "check";
+    render();
+  }
+  try {
+    V = await invoke("check_updates", { now: !!asked });
+    if (asked) toast(updateSummary(), U().note ? "info" : "done");
+  } catch (error) {
+    if (asked) problem(error);
+  }
+  if (asked) ui.busy = "";
+  render();
+}
+
+/** Runs one update step that ends in a new view, with `busy` naming it meanwhile. */
+async function updateStep(busy, command, args) {
+  if (ui.busy) return null;
+  ui.busy = busy;
+  ui.problem = "";
+  render();
+  let result = null;
+  try {
+    result = await invoke(command, args);
+  } catch (error) {
+    problem(error);
+  }
+  ui.busy = "";
+  render();
+  return result;
+}
+
+async function updateLauncher() {
+  const said = await updateStep("launcher", "update_launcher");
+  // On success the new launcher starts and this one closes; otherwise the player has steps to do.
+  if (said) toast(said, said.startsWith("Starting") ? "done" : "keep");
+}
+
+async function installBuild() {
+  const view = await updateStep("leonida", "install_build");
+  if (!view) return;
+  V = view;
+  doneChanging();
+  ui.hl = "warmTile";
+  render();
+  $("warmTile").focus({ preventScroll: true });
+  toast(`Using Leonida build ${U().have_build}. Warm up the shaders once before you play: a new build translates them again.`, "keep");
+}
+
+async function later(what) {
+  try {
+    V = await invoke("update_later", { what });
+    toast("Hidden until a newer one comes out. About still shows what you have.", "info");
+  } catch (error) {
+    problem(error);
+  }
+  render();
+  if (!ui.panel) $("playBtn").focus({ preventScroll: true });
+}
+
+async function usePrevious() {
+  try {
+    V = await invoke("use_previous");
+    doneChanging("Using the previous build");
+  } catch (error) {
+    problem(error);
+  }
+  render();
+  checkUpdates(false);
+}
+
+async function updateCheckout() {
+  const said = await updateStep("checkout", "update_checkout");
+  if (said) toast(said, "done");
 }
 
 /** The user's own choices as the back end stores them, with `change` applied. */
@@ -1504,7 +1746,8 @@ function back() {
 }
 
 /** The Play rows in order, as the elements that take focus. */
-const playRows = () => [$("playBtn"), $("gameTile"), $("leonidaTile"), $("warmTile"), $("modeTile"), $("testTile")];
+const playRows = () => [$("playBtn"), $("launcherNews"), $("buildNews"), $("gameTile"), $("leonidaTile"), $("warmTile"),
+  $("modeTile"), $("testTile")].filter((row) => !row.hidden);
 
 function moveRow(d) {
   const rows = playRows();
@@ -1538,6 +1781,15 @@ const ACTIONS = {
   buildSteps: () => invoke("open_build_steps").catch(problem),
   creditFork: () => invoke("open_credit", { which: "fork" }).catch(problem),
   creditVictory: () => invoke("open_credit", { which: "victory" }).catch(problem),
+  checkNow: () => checkUpdates(true),
+  updateLauncher,
+  laterLauncher: () => later("launcher"),
+  launcherPage: () => invoke("open_release", { which: "launcher" }).catch(problem),
+  installBuild,
+  laterBuild: () => later("leonida"),
+  buildPage: () => invoke("open_release", { which: "leonida" }).catch(problem),
+  usePrevious,
+  updateCheckout,
 };
 
 document.addEventListener("click", (event) => {
@@ -1598,6 +1850,11 @@ document.addEventListener("click", (event) => {
     else if (b.tile) flash(b.tile);
     else toast("The game is running. Warm up after you close it.", "info");
     return;
+  }
+  const news = target.closest("#launcherNews, #buildNews");
+  if (news) {
+    highlight(news.id);
+    return focusHero();
   }
   if (target.closest("#modeTile")) return openPanel(true, "panel");
   if (target.closest("#testTile")) return openTest();
@@ -1768,11 +2025,19 @@ document.addEventListener("mousedown", (event) => {
 });
 setInterval(renderClock, 20000);
 
+// Coming back to the window also asks about updates; the back end goes to GitHub at most once an
+// hour.
 document.addEventListener("visibilitychange", () => {
   document.body.classList.toggle("still", document.hidden || ui.running);
-  if (!document.hidden) checkRunning();
+  if (!document.hidden) {
+    checkRunning();
+    checkUpdates(false);
+  }
 });
-window.addEventListener("focus", checkRunning);
+window.addEventListener("focus", () => {
+  checkRunning();
+  checkUpdates(false);
+});
 
 try {
   $("advanced").open = localStorage.getItem("advancedOpen") === "1";
@@ -1795,5 +2060,6 @@ invoke("view")
     if (view.notice) problem(view.notice);
     checkRunning();
     refreshLists(false);
+    checkUpdates(false);
   })
   .catch(problem);
