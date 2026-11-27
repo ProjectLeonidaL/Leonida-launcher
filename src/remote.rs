@@ -214,8 +214,10 @@ pub fn classify(exit: Option<i32>, stdout: &[u8]) -> Result<String, Miss> {
 /// `file` from `repository` on GitHub with Windows' own curl.exe.
 fn download(repository: &str, file: &str) -> Result<String, Miss> {
     let curl = |best_effort: bool| {
-        let mut command = Command::new("curl.exe");
-        command.args(["--silent", "--location", "--max-time", "10"]);
+        let mut command = Command::new(crate::pc::windows_tool("curl.exe"));
+        // --disable, which must come first, keeps a .curlrc from adding headers, a proxy or
+        // --insecure.
+        command.args(["--disable", "--silent", "--location", "--max-time", "10"]);
         if best_effort {
             // Offline, Windows can't check the certificate's revocation and curl stops with 35.
             command.arg("--ssl-revoke-best-effort");

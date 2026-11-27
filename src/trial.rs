@@ -1355,7 +1355,7 @@ fn remember(test: &Test) {
 
 /// Opens #test-results in the Discord app when it is installed, otherwise in the browser.
 pub fn open_discord() -> Result<(), String> {
-    let app = Command::new("reg.exe")
+    let app = Command::new(pc::windows_tool("reg.exe"))
         .args(["query", r"HKCR\discord"])
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -1377,7 +1377,7 @@ pub fn open_invite() -> Result<(), String> {
 pub fn open_tests() -> Result<(), String> {
     let dir = tests_dir().ok_or("There's no tests folder.")?;
     fs::create_dir_all(&dir).map_err(|e| format!("Couldn't make the tests folder ({e})."))?;
-    Command::new("explorer.exe")
+    Command::new(pc::windows_tool("explorer.exe"))
         .arg(dir)
         .spawn()
         .map(drop)
@@ -1385,7 +1385,7 @@ pub fn open_tests() -> Result<(), String> {
 }
 
 fn open(url: &str) -> Result<(), String> {
-    Command::new("explorer.exe")
+    Command::new(pc::windows_tool("explorer.exe"))
         .arg(url)
         .spawn()
         .map(drop)

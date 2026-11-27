@@ -160,7 +160,7 @@ pub fn folder(exe: &Path) -> PathBuf {
 /// Whether a leonida.exe is running already; two at once fight over the shader cache.
 pub fn running() -> bool {
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-    Command::new("tasklist.exe")
+    Command::new(crate::pc::windows_tool("tasklist.exe"))
         .args(["/FI", "IMAGENAME eq leonida.exe", "/NH", "/FO", "CSV"])
         .creation_flags(CREATE_NO_WINDOW)
         .output()

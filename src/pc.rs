@@ -16,6 +16,19 @@ use crate::leonida::{self, Card};
 
 pub const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
+/// One of Windows' own programs by its full path: `name` in System32, or explorer.exe in the
+/// Windows folder. Started by bare name, a file of the same name beside the launcher (in Downloads,
+/// say) would run instead.
+pub fn windows_tool(name: &str) -> PathBuf {
+    let root =
+        env::var_os("SystemRoot").map_or_else(|| PathBuf::from(r"C:\Windows"), PathBuf::from);
+    if name.eq_ignore_ascii_case("explorer.exe") {
+        root.join(name)
+    } else {
+        root.join("System32").join(name)
+    }
+}
+
 /// leonida.exe in its folder with only `env` as LEONIDA_* variables: the launcher's own
 /// environment may carry some, and test runs must not depend on them.
 pub fn leonida(exe: &Path, env: &[(String, String)]) -> Command {
@@ -210,7 +223,7 @@ pub fn names() -> Vec<String> {
 }
 
 fn reg(args: &[&str]) -> String {
-    let mut command = Command::new("reg.exe");
+    let mut command = Command::new(windows_tool("reg.exe"));
     command
         .arg("query")
         .args(args)
