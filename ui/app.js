@@ -154,7 +154,13 @@ function blocker() {
     if (V.updates.game === "download") {
       return { tile: "leonidaTile", text: "Leonida Legacy isn't on this PC yet.", fix: downloadLabel(), act: "installBuild" };
     }
+    if (unreachable()) {
+      return { tile: "leonidaTile", text: "Leonida Legacy isn't on this PC, and the launcher couldn't reach GitHub to get the ready-made build.", fix: "Try again", act: "checkNow" };
+    }
     return { tile: "leonidaTile", text: "Leonida Legacy isn't built yet, or the launcher can't find it.", fix: "Find leonida.exe", act: "findExe" };
+  }
+  if (installing()) {
+    return { tile: null, label: "A build is downloading.", text: "START works again once it is in place." };
   }
   if (testing()) {
     return { tile: null, label: "A test is running.", text: "Finish the run in Test a setting first." };
@@ -168,11 +174,27 @@ function blocker() {
 /* ---------- Updates ---------- */
 
 const U = () => V.updates;
+/** A ready-made build is downloading: START and changing leonida.exe wait for it. */
+const installing = () => ui.busy === "leonida" || !!(V && U().busy === "leonida");
+/** No leonida.exe, and the check that would offer the ready-made build didn't reach GitHub. */
+const unreachable = () => !!(V && !V.has_exe && U().game === "unknown" && U().note);
 /** A newer launcher the player hasn't answered Later to. */
 const launcherNews = () => !!(V && U().launcher_new && !U().launcher_later);
-/** A newer ready-made build than the one in use, not answered Later to. */
-const buildNews = () => !!(V && U().game === "behind" && !U().game_later);
+/** A newer ready-made build than the one in use, not answered Later to and not downloading (START says so). */
+const buildNews = () => !!(V && U().game === "behind" && !U().game_later && !installing());
+/** Both are out: one row and one pane hold them, so the Play list keeps its length. */
+const bothNews = () => launcherNews() && buildNews();
 const downloadLabel = () => `Download Leonida (build ${U().newest}, ${U().newest_size})`;
+
+/** The link to the leonida.exe used before, named by where it goes. */
+function previousLabel() {
+  const u = U();
+  if (!u.previous_build) return "Go back to your own build";
+  return !u.have_build || u.previous_build > u.have_build
+    ? `Switch to build ${u.previous_build}` : `Go back to build ${u.previous_build}`;
+}
+/** The previous build, unless it is the newest one that Update already offers. */
+const showPrevious = () => !!U().previous && !(U().game === "behind" && U().previous_build === U().newest);
 
 /** "Today at 21:40" or "26 Nov at 09:12" for a time in seconds since 1970. */
 function when(secs) {
@@ -193,6 +215,7 @@ function updateSummary() {
     current: `You have build ${u.newest}, the newest Leonida build.`,
     own: `The newest ready-made Leonida build is ${u.newest}.`,
     old: `The newest ready-made Leonida build is ${u.newest}.`,
+    ahead: `The newest published ready-made Leonida build is ${u.newest}, a lower number than yours.`,
     none: "No ready-made Leonida builds are published yet.",
   }[u.game] || "";
   return `${launcher} ${game}`.trim();
@@ -201,16 +224,17 @@ function updateSummary() {
 /** The ways to get a newer Leonida for the build in use, as buttons for the detail pane. */
 function buildActions(withPick) {
   const u = U();
-  const busy = ui.busy ? " disabled" : "";
-  const getting = ui.busy === "leonida" ? "Downloading..." : "";
+  const busy = ui.busy || installing() ? " disabled" : "";
+  const getting = installing() ? "Downloading..." : "";
   let html = "";
   if (u.game === "behind") html += btn("installBuild", getting || `Update to build ${u.newest}`, "warm", busy);
+  if (u.game === "ahead") html += btn("installBuild", getting || `Switch to build ${u.newest}`, "ghost", busy);
   if (u.game === "own" || u.game === "old") {
-    html += btn("installBuild", getting || "Use ready-made builds", "warm", busy) +
-      btn("updateCheckout", ui.busy === "checkout" ? "Asking..." : "Update my checkout", "ghost", busy);
+    html += btn("installBuild", getting || "Use ready-made builds", "warm", busy);
+    if (u.checkout) html += btn("updateCheckout", ui.busy === "checkout" ? "Asking..." : "Update my checkout", "ghost", busy);
   }
-  if (withPick) html += btn("pickLeonida", "Pick another leonida.exe");
-  if (u.previous) html += link("usePrevious", `Use the previous build (${esc(u.previous)})`);
+  if (withPick) html += btn("pickLeonida", "Pick another leonida.exe", "ghost", installing() ? " disabled" : "");
+  if (showPrevious()) html += link("usePrevious", previousLabel(), busy);
   return html;
 }
 
@@ -220,7 +244,11 @@ function renderAbout() {
   const u = U();
   const a = (act, text) => `<button class="link-btn" type="button" data-act="${act}" data-key="about-${act}">${text}</button>`;
   let launcher = esc(u.launcher);
-  if (u.launcher_new) {
+  if (u.by_hand) {
+    // Repeated here because the toast with these steps can be closed or pushed out.
+    launcher += `. The new launcher is downloaded: close this launcher, then copy ${esc(u.by_hand)} over ` +
+      `${esc(u.launcher_exe)}. ` + a("showLauncherFile", "Show the file") + " " + a("launcherPage", "Release page");
+  } else if (u.launcher_new) {
     launcher += `. Version ${esc(u.launcher_new)} is out: ` +
       a("updateLauncher", ui.busy === "launcher" ? "Updating..." : "Update now") + " " + a("launcherPage", "What's new");
   } else if (u.checked && !u.note) {
@@ -230,10 +258,11 @@ function renderAbout() {
 
   let have = esc(V.has_exe ? u.have : "None yet");
   if (u.game === "behind") have += `. Build ${u.newest} is out: ` + a("installBuild", ui.busy === "leonida" ? "Downloading..." : "Update");
+  if (u.game === "ahead") have += `. Newest ready-made: ${u.newest}. ` + a("installBuild", `Switch to build ${u.newest}`);
   if (u.game === "own" || u.game === "old") {
-    have += ". " + a("installBuild", "Use ready-made builds") + " or " + a("updateCheckout", "Update my checkout");
+    have += ". " + a("installBuild", "Use ready-made builds") + (u.checkout ? " or " + a("updateCheckout", "Update my checkout") : "");
   }
-  if (u.previous) have += `<span class="arow-note">${a("usePrevious", `Use the previous build (${esc(u.previous)})`)}</span>`;
+  if (showPrevious()) have += `<span class="arow-note">${a("usePrevious", previousLabel())}</span>`;
   if (u.warm) have += `<span class="arow-note">New build: warm up the shaders once before you play.</span>`;
   setHTML($("aboutHave"), have);
 
@@ -254,6 +283,7 @@ function heroState() {
   if (ui.hero === "leonida") return "leonida";
   if (ui.hero === "game") return ui.found.length ? "pick" : "game";
   // An update row explains itself in the pane while the highlight bar is on it.
+  if (ui.hl === "launcherNews" && bothNews()) return "bothNews";
   if ((ui.hl === "launcherNews" && launcherNews()) || (ui.hl === "buildNews" && buildNews())) return ui.hl;
   if (!V.has_game) return ui.found.length ? "pick" : "game";
   if (!V.has_exe) return "leonida";
@@ -358,16 +388,25 @@ function renderHero() {
       btn("pickFolder", "Pick the folder") +
       link("pickExe", "Pick the game's .exe instead") +
       (V.has_game ? link("keep", "Keep the current folder") : "");
-  } else if (state === "leonida" && !V.has_exe && U().game === "download") {
-    title = "Get Leonida Legacy";
-    text = "Download the newest ready-made build from GitHub. It needs nothing else installed and goes into the " +
-      "launcher's own folder. If you build Leonida Legacy yourself, find or pick your leonida.exe instead.";
+  } else if (state === "leonida" && !V.has_exe && (U().game === "download" || unreachable())) {
+    const offline = U().game !== "download";
+    const changing = installing() ? " disabled" : "";
+    title = offline ? "Couldn't reach GitHub" : "Get Leonida Legacy";
+    text = offline
+      ? `The ready-made build of Leonida Legacy comes from GitHub. ${U().note} ` +
+        "Try again when you're online, or find or pick your own leonida.exe."
+      : "Download the newest ready-made build from GitHub. It needs nothing else installed and goes into the " +
+        "launcher's data folder; nothing is installed in Windows. If you build Leonida Legacy yourself, find or " +
+        "pick your leonida.exe instead.";
+    const checking = ui.busy === "check" || U().checking;
     actions =
-      btn("installBuild", ui.busy === "leonida" ? "Downloading..." : downloadLabel(), "warm", ui.busy ? " disabled" : "") +
-      btn("findExe", ui.findingExe ? "Looking..." : "Find my own build", "ghost", ui.findingExe ? " disabled" : "") +
-      btn("pickLeonida", "Pick leonida.exe") +
+      (offline
+        ? btn("checkNow", checking ? "Checking GitHub..." : "Try again", "warm", ui.busy ? " disabled" : "")
+        : btn("installBuild", ui.busy === "leonida" ? "Downloading..." : downloadLabel(), "warm", ui.busy ? " disabled" : "")) +
+      btn("findExe", ui.findingExe ? "Looking..." : "Find my own build", "ghost", ui.findingExe ? " disabled" : changing) +
+      btn("pickLeonida", "Pick leonida.exe", "ghost", changing) +
       link("buildSteps", "Open the build steps") +
-      (U().previous ? link("usePrevious", `Use the previous build (${esc(U().previous)})`) : "");
+      (U().previous ? link("usePrevious", previousLabel(), changing) : "");
   } else if (state === "leonida") {
     title = V.has_exe ? "Change leonida.exe" : "Find Leonida Legacy";
     textHtml = "The launcher needs leonida.exe, which you get by building Leonida Legacy once. " +
@@ -381,8 +420,9 @@ function renderHero() {
   } else if (state === "launcherNews") {
     const u = U();
     title = `Launcher ${u.launcher_new} is out`;
-    text = `You have ${u.launcher}. Update now downloads the new launcher from GitHub, checks it against its ` +
-      "checksum, puts it in place of this one and starts it again. Your settings stay. Later hides this until a newer one comes out.";
+    text = `You have ${u.launcher}. Update now downloads the new launcher from GitHub, checks that it is the real ` +
+      "file from the project, puts it in place of this one and starts it again. Your settings stay. Later hides this " +
+      "until a newer one comes out.";
     actions =
       btn("updateLauncher", ui.busy === "launcher" ? "Updating..." : "Update now", "warm", ui.busy ? " disabled" : "") +
       btn("laterLauncher", "Later") +
@@ -392,13 +432,26 @@ function renderHero() {
     const u = U();
     title = `Leonida build ${u.newest} is out`;
     text = `You have build ${u.have_build}. Newer builds bring fixes, often for speed too. Update downloads build ` +
-      `${u.newest} (${u.newest_size}) from GitHub and switches to it. Build ${u.have_build} stays, so you can go back. ` +
-      "Later hides this until a newer build comes out.";
+      `${u.newest} (${u.newest_size}) from GitHub and switches to it. Build ${u.have_build} stays: ` +
+      `"Go back to build ${u.have_build}" on the Leonida row undoes it. Later hides this until a newer build comes out.`;
     actions =
       btn("installBuild", ui.busy === "leonida" ? "Downloading..." : "Update", "warm", ui.busy ? " disabled" : "") +
       btn("laterBuild", "Later") +
       link("buildPage", "What's new");
     facts = [["You have", `Build ${u.have_build}`], ["Newest", `Build ${u.newest}`]];
+  } else if (state === "bothNews") {
+    const u = U();
+    const busy = ui.busy ? " disabled" : "";
+    title = "2 updates are out";
+    text = `Launcher ${u.launcher_new} (you have ${u.launcher}) and Leonida build ${u.newest} (you have build ` +
+      `${u.have_build}, ${u.newest_size} to download). Update Leonida first: the launcher restarts when it updates. ` +
+      `Build ${u.have_build} stays, so you can go back from the Leonida row. Later hides both until newer ones come out.`;
+    actions =
+      btn("installBuild", ui.busy === "leonida" ? "Downloading..." : `Update to build ${u.newest}`, "warm", busy) +
+      btn("updateLauncher", ui.busy === "launcher" ? "Updating..." : `Update the launcher to ${u.launcher_new}`, "warm", busy) +
+      btn("laterBoth", "Later") +
+      link("buildPage", "What's new in Leonida") +
+      link("launcherPage", "What's new in the launcher");
   } else if (state === "gameInfo") {
     title = "Game folder";
     text = "The folder you installed the game to, with MicrosoftGame.config inside. Press Enter to change it.";
@@ -406,15 +459,18 @@ function renderHero() {
   } else if (state === "exeInfo") {
     const u = U();
     title = "Leonida Legacy";
+    const update = u.checkout ? "Switch to the ready-made builds, or update your checkout to the newest code."
+      : "Switch to the ready-made builds to get the newest one.";
     text = {
       behind: `Build ${u.have_build}. Build ${u.newest} is out. START runs the build you have until you update.`,
-      own: `Your own build, from your checkout. The newest ready-made build is ${u.newest}. Switch to the ready-made ` +
-        "builds, or update your checkout to the newest code.",
-      old: `A build from before build numbers. The newest ready-made build is ${u.newest}. Switch to the ready-made ` +
-        "builds, or update your checkout to the newest code.",
+      own: `Your own build. The newest ready-made build is ${u.newest}. ${update}`,
+      old: `A build from before build numbers. The newest ready-made build is ${u.newest}. ${update}`,
       current: `Build ${u.have_build}, the newest. START runs it with your settings.`,
+      ahead: `Build ${u.have_build}. The newest published ready-made build is ${u.newest}, a lower number: the ` +
+        "project may have started counting again. Switch to it to follow the new numbers.",
     }[u.game] || "The leonida.exe START runs with your settings. Press Enter to pick another one.";
-    facts = [["Build", u.have], ["Program", V.leonida_exe], ["Folder", V.checkout]];
+    // The folder it runs in is the start of the Program line, for a ready-made and an own build alike.
+    facts = [["Build", u.have], ["Program", V.leonida_exe]];
     actions = buildActions(true);
   } else if (state === "warm") {
     title = "Warm up shaders";
@@ -490,6 +546,7 @@ function stepTile(id, n, title, found, line, tip) {
 function warmBlock() {
   if (!V) return "Checking...";
   if (!V.has_game || !V.has_exe) return "Needs the game folder and leonida.exe first.";
+  if (installing()) return "Not while a build downloads.";
   if (testing()) return "Not while a test runs.";
   if (ui.running) return "Not while the game is running.";
   return "";
@@ -507,22 +564,28 @@ function renderTiles() {
     own: `Your own build. Newest ready-made: ${u.newest}`,
     old: `An older build without a number. Newest ready-made: ${u.newest}`,
     current: `Build ${u.have_build}, the newest`,
+    ahead: `Build ${u.have_build}. Newest ready-made: ${u.newest}`,
   }[u.game] || `In ${leaf(V.checkout)}`;
-  stepTile("leonidaTile", 2, "Leonida", V.has_exe,
-    V.has_exe ? exeLine : u.game === "download" ? `Not on this PC yet. Build ${u.newest} is ready to download` : "leonida.exe not found",
+  const missingLine = u.game === "download" ? `Not on this PC yet. Build ${u.newest} is ready to download`
+    : unreachable() ? "Not on this PC yet. GitHub couldn't be reached" : "leonida.exe not found";
+  stepTile("leonidaTile", 2, "Leonida", V.has_exe, V.has_exe ? exeLine : missingLine,
     V.leonida_exe || "Find or pick leonida.exe");
 
+  // With both out, the launcher row stands for both, so the list keeps its length.
   const launcherRow = $("launcherNews");
   launcherRow.hidden = !launcherNews();
-  if (!launcherRow.hidden) {
+  if (bothNews()) {
+    menuRow("launcherNews", "2 UPDATES ARE OUT", `Launcher ${u.launcher_new} and Leonida build ${u.newest}`,
+      ui.busy === "launcher" ? "Updating..." : ui.busy === "leonida" ? "Downloading..." : "See both", "warn");
+  } else if (!launcherRow.hidden) {
     menuRow("launcherNews", `LAUNCHER ${u.launcher_new} IS OUT`, `You have ${u.launcher}. Updating takes a few seconds.`,
       ui.busy === "launcher" ? "Updating..." : "Update", "warn");
   }
   const buildRow = $("buildNews");
-  buildRow.hidden = !buildNews();
+  buildRow.hidden = !buildNews() || bothNews();
   if (!buildRow.hidden) {
     menuRow("buildNews", `LEONIDA BUILD ${u.newest} IS OUT`, `You have build ${u.have_build}. Download ${u.newest_size}.`,
-      ui.busy === "leonida" ? "Downloading..." : "Update", "warn");
+      "Update", "warn");
   }
 
   const warm = $("warmTile");
@@ -1611,8 +1674,11 @@ async function updateStep(busy, command, args) {
 
 async function updateLauncher() {
   const said = await updateStep("launcher", "update_launcher");
-  // On success the new launcher starts and this one closes; otherwise the player has steps to do.
-  if (said) toast(said, said.startsWith("Starting") ? "done" : "keep");
+  if (!said) return;
+  // On success the new launcher starts and this one closes; otherwise the player has steps to do,
+  // which About repeats.
+  toast(said.text, said.restarting ? "done" : "keep");
+  if (!said.restarting) checkUpdates(false);
 }
 
 async function installBuild() {
@@ -1787,7 +1853,9 @@ const ACTIONS = {
   launcherPage: () => invoke("open_release", { which: "launcher" }).catch(problem),
   installBuild,
   laterBuild: () => later("leonida"),
+  laterBoth: () => later("both"),
   buildPage: () => invoke("open_release", { which: "leonida" }).catch(problem),
+  showLauncherFile: () => invoke("show_launcher_file").catch(problem),
   usePrevious,
   updateCheckout,
 };
@@ -1848,7 +1916,7 @@ document.addEventListener("click", (event) => {
     const b = blocker();
     if (!b) launch("warm");
     else if (b.tile) flash(b.tile);
-    else toast("The game is running. Warm up after you close it.", "info");
+    else toast(installing() ? "A build is downloading. Warm up once it is in place." : "The game is running. Warm up after you close it.", "info");
     return;
   }
   const news = target.closest("#launcherNews, #buildNews");
