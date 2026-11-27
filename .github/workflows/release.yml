@@ -1,0 +1,137 @@
+name: Release
+
+# Pushing a tag vX.Y.Z builds leonida-launcher.exe and attaches it, with
+# leonida-launcher.exe.sha256, to the release for that tag (made here if it does not exist yet).
+# The launcher's self-update reads both from releases/latest, so the tag must match the version
+# in Cargo.toml: the run fails otherwise. A pull request that changes this file builds the exe as
+# an artifact and publishes nothing.
+on:
+  push:
+    tags: ['v*']
+  pull_request:
+    paths:
+      - .github/workflows/release.yml
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # Runs the build scripts and proc macros of every dependency, so it has a read-only token, and
+  # checkout does not leave that token in .git/config.
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - name: Check that the tag matches Cargo.toml
+        if: github.event_name == 'push'
+        shell: pwsh
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          $package = (Get-Content -Raw Cargo.toml) -split '(?m)^\[' |
+            Where-Object { $_ -match '^package\]' } | Select-Object -First 1
+          if ($package -notmatch '(?m)^version\s*=\s*"([^"]+)"') {
+            throw 'no version in the [package] table of Cargo.toml'
+          }
+          $version = $Matches[1]
+          if ($env:TAG -ne "v$version") {
+            throw "tag $env:TAG does not match version $version in Cargo.toml (expected v$version)"
+          }
+          "Cargo.toml version $version matches $env:TAG"
+      # The repository pins no toolchain: build with the current stable.
+      - run: rustup toolchain install stable --profile minimal
+      - uses: Swatinem/rust-cache@v2
+      # tauri-build links the C runtime in by default, so the exe also starts on a PC without
+      # the Visual C++ Redistributable.
+      - name: Build
+        run: cargo +stable build --release --locked
+      # The release holds the exe alone, so it must not need a DLL that only sits next to it in
+      # target\release.
+      - name: Check that the exe needs no Visual C++ runtime or WebView2Loader.dll
+        shell: pwsh
+        run: |
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $vs = & $vswhere -latest -products * -property installationPath
+          $dumpbin = Get-ChildItem "$vs\VC\Tools\MSVC\*\bin\Hostx64\x64\dumpbin.exe" |
+            Select-Object -First 1
+          if (-not $dumpbin) { throw 'dumpbin.exe not found' }
+          $deps = & $dumpbin.FullName /nologo /dependents target\release\leonida-launcher.exe
+          if ($LASTEXITCODE -ne 0) { throw 'dumpbin failed' }
+          $bad = @($deps | Where-Object {
+            $_ -match '(?i)vcruntime|msvcp|api-ms-win-crt|webview2loader'
+          })
+          if ($bad.Count -gt 0) { throw "leonida-launcher.exe imports $(($bad.Trim()) -join ', ')" }
+          $deps
+      # The same line format as sha256sum: '<hex>  leonida-launcher.exe'.
+      - name: Package
+        shell: pwsh
+        run: |
+          $dir = New-Item -ItemType Directory out
+          Copy-Item target\release\leonida-launcher.exe $dir
+          $exe = Join-Path $dir 'leonida-launcher.exe'
+          $hex = (Get-FileHash -Algorithm SHA256 $exe).Hash.ToLowerInvariant()
+          [IO.File]::WriteAllText("$exe.sha256", "$hex  leonida-launcher.exe`n")
+          Get-Content "$exe.sha256"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: leonida-launcher
+          path: |
+            out/leonida-launcher.exe
+            out/leonida-launcher.exe.sha256
+          retention-days: 7
+
+  # The only job with a write token. It runs nothing from the repository: no checkout.
+  publish:
+    needs: build
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      TAG: ${{ github.ref_name }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: leonida-launcher
+      - name: Publish
+        shell: pwsh
+        run: |
+          $repo = $env:GITHUB_REPOSITORY
+          $files = 'leonida-launcher.exe', 'leonida-launcher.exe.sha256'
+          foreach ($f in $files) { if (-not (Test-Path $f)) { throw "$f is missing" } }
+          gh release view $env:TAG --repo $repo *> $null
+          if ($LASTEXITCODE -eq 0) {
+            gh release upload $env:TAG @files --repo $repo --clobber
+            if ($LASTEXITCODE -ne 0) { throw 'gh release upload failed' }
+            "Replaced the files on $env:TAG"
+            exit 0
+          }
+          $version = $env:TAG.Substring(1)
+          $notes = @(
+            "Leonida Launcher $version.",
+            '',
+            '1. Download leonida-launcher.exe below.',
+            '2. Put it in a folder of its own and double-click it.',
+            '',
+            'A launcher that is already installed offers this version by itself: Update now on',
+            'its banner, or Check for updates now on the About tab.',
+            '',
+            'Windows 10/11 x64 with the WebView2 runtime (part of Windows 11 and of current',
+            'Windows 10). Windows may warn that the file is not signed: More info, then Run',
+            'anyway. leonida-launcher.exe.sha256 holds its SHA-256.'
+          ) -join "`n"
+          gh release create $env:TAG @files --repo $repo --verify-tag `
+            --title "Leonida Launcher $version" --notes $notes
+          if ($LASTEXITCODE -ne 0) { throw 'gh release create failed' }
