@@ -1,11 +1,13 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod art;
 mod game_dir;
 mod leonida;
 mod remote;
 mod settings;
 mod theme;
 
+use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
@@ -15,18 +17,26 @@ use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::thread;
 use std::time::Duration;
 
-use eframe::egui::{self, Frame, Margin, RichText};
+use eframe::egui::{
+    self, Align, Color32, Frame, Label, Layout, Margin, Rect, RichText, Sense, Stroke, Ui,
+    UiBuilder, pos2, vec2,
+};
 
 use game_dir::{Found, Search};
 use leonida::Profile;
 use remote::{Lists, Source, Switch};
 use settings::Settings;
-use theme::{FOAM, MUTED, ORANGE};
+use theme::{
+    DRIFTWOOD, FLAMINGO, INSET, LINE, NIGHT, NIGHT_TOP, PLATE, PLATE_ALT, SAND, SUNSET, TEAL,
+};
 
 const CREATE_NEW_CONSOLE: u32 = 0x0000_0010;
 const SEARCH_LIMIT: Duration = Duration::from_secs(60);
 const PLAY: &str = "run --execute";
 const WARM_UP: &str = "translate --warm all";
+/// Space added between plates on top of the item spacing.
+const PLATE_GAP: f32 = 6.0;
+const FLASH: f64 = 1.2;
 
 fn main() -> eframe::Result {
     let options = eframe::NativeOptions {
@@ -72,6 +82,21 @@ fn finished<T>(job: &mut Option<Receiver<T>>) -> Option<T> {
     result
 }
 
+/// How the run bar shows a status message.
+#[derive(Clone, Copy, PartialEq)]
+enum Tone {
+    Info,
+    Ok,
+    Warn,
+}
+
+/// The two steps Play needs.
+#[derive(Clone, Copy, PartialEq)]
+enum Step {
+    Game,
+    Leonida,
+}
+
 struct Launcher {
     settings: Settings,
     game_name: String,
@@ -83,6 +108,11 @@ struct Launcher {
     search: Option<Receiver<Search>>,
     found: Vec<Found>,
     status: String,
+    status_tone: Tone,
+    /// The step a click on the unready Play button asked to be shown.
+    reveal: Option<Step>,
+    /// The plate that flashes after a reveal, and until when.
+    flash: Option<(Step, f64)>,
     dirty: bool,
 }
 
@@ -106,6 +136,9 @@ impl Launcher {
             search: None,
             found: Vec::new(),
             status: String::new(),
+            status_tone: Tone::Info,
+            reveal: None,
+            flash: None,
             dirty: true,
         };
         launcher.reload_profiles();
@@ -122,6 +155,11 @@ impl Launcher {
 
     fn has_game(&self) -> bool {
         game_dir::has_config(Path::new(&self.settings.game_dir))
+    }
+
+    fn set_status(&mut self, text: impl Into<String>, tone: Tone) {
+        self.status = text.into();
+        self.status_tone = tone;
     }
 
     fn reload_profiles(&mut self) {
@@ -151,15 +189,21 @@ impl Launcher {
         let searching = self.search.is_some();
         let Some(search) = finished(&mut self.search) else {
             if searching && self.search.is_none() {
-                self.status = "The search stopped unexpectedly. Pick the folder yourself.".into();
+                self.set_status(
+                    "The search stopped unexpectedly. Pick the folder yourself.",
+                    Tone::Warn,
+                );
             }
             return;
         };
-        self.status = match search.games.len() {
-            0 => "No game folder found. Pick it yourself.".into(),
-            1 => format!("Found {}.", search.games[0].name),
-            n => format!("Found {n} games. Click your copy of the game."),
-        };
+        match search.games.len() {
+            0 => self.set_status("No game folder found. Pick it yourself.", Tone::Warn),
+            1 => self.set_status(format!("Found {}.", search.games[0].name), Tone::Ok),
+            n => self.set_status(
+                format!("Found {n} games. Click your copy of the game."),
+                Tone::Info,
+            ),
+        }
         if search.timed_out {
             self.status += " Stopped looking after 60 s.";
         }
@@ -185,13 +229,53 @@ impl Launcher {
                 self.status.clear();
             }
             None => {
-                self.status = format!(
+                let text = format!(
                     "No MicrosoftGame.config in {} or the folders around it. Pick the folder \
                      the game was installed to.",
                     path.display()
-                )
+                );
+                self.set_status(text, Tone::Warn);
             }
         }
+    }
+
+    /// The ticked profiles that are in the list; the others are not sent.
+    fn ticked_profiles(&self) -> Vec<&str> {
+        self.settings
+            .profiles
+            .iter()
+            .filter(|name| self.profiles.iter().any(|p| &p.name == *name))
+            .map(String::as_str)
+            .collect()
+    }
+
+    /// How many listed switches are set to something other than default.
+    fn changed_switches(&self) -> usize {
+        self.switches
+            .iter()
+            .filter(|s| {
+                self.settings
+                    .switches
+                    .get(&s.name)
+                    .is_some_and(|v| !v.is_empty())
+            })
+            .count()
+    }
+
+    /// The NAME=value lines of the extra switches, comments left out.
+    fn extra_lines(&self) -> Vec<(String, String)> {
+        let mut lines = Vec::new();
+        for line in self.settings.extra.lines().map(str::trim) {
+            if line.starts_with('#') {
+                continue;
+            }
+            if let Some((name, value)) = line.split_once('=')
+                && !name.trim().is_empty()
+            {
+                lines.push((name.trim().to_string(), value.trim().to_string()));
+            }
+        }
+        lines
     }
 
     /// The environment of a run: the game folder, the ticked profiles and the chosen switches.
@@ -200,13 +284,7 @@ impl Launcher {
             "LEONIDA_GAME_DIR".to_string(),
             self.settings.game_dir.clone(),
         )];
-        let profiles: Vec<&str> = self
-            .settings
-            .profiles
-            .iter()
-            .filter(|name| self.profiles.iter().any(|p| &p.name == *name))
-            .map(String::as_str)
-            .collect();
+        let profiles = self.ticked_profiles();
         if !profiles.is_empty() {
             env.push(("LEONIDA_PROFILE".into(), profiles.join(",")));
         }
@@ -220,16 +298,7 @@ impl Launcher {
                 env.push((format!("LEONIDA_{}", switch.name), value.clone()));
             }
         }
-        for line in self.settings.extra.lines().map(str::trim) {
-            if line.starts_with('#') {
-                continue;
-            }
-            if let Some((name, value)) = line.split_once('=')
-                && !name.trim().is_empty()
-            {
-                env.push((name.trim().to_string(), value.trim().to_string()));
-            }
-        }
+        env.extend(self.extra_lines());
         env
     }
 
@@ -252,15 +321,18 @@ impl Launcher {
 
     fn launch(&mut self, args: &str) {
         if !self.has_exe() {
-            self.status = "Pick leonida.exe first.".into();
+            self.set_status("Pick leonida.exe first.", Tone::Warn);
             return;
         }
         if !self.has_game() {
-            self.status = "Pick the game folder first.".into();
+            self.set_status("Pick the game folder first.", Tone::Warn);
             return;
         }
         if leonida::running() {
-            self.status = "leonida.exe is already running. Close it first.".into();
+            self.set_status(
+                "leonida.exe is already running. Close it first.",
+                Tone::Warn,
+            );
             return;
         }
         let exe = self.exe();
@@ -271,30 +343,84 @@ impl Launcher {
             .envs(self.env())
             .creation_flags(CREATE_NEW_CONSOLE)
             .spawn();
-        self.status = match (started, args) {
-            (Ok(_), PLAY) => "Started the game. Its log is in the new window.".into(),
-            (Ok(_), _) => "Warming up the shaders in a new window. Play when it is done.".into(),
-            (Err(error), _) => format!("Couldn't start leonida.exe: {error}"),
-        };
+        match (started, args) {
+            (Ok(_), PLAY) => {
+                self.set_status("Started the game. Its log is in the new window.", Tone::Ok)
+            }
+            (Ok(_), _) => self.set_status(
+                "Warming up the shaders in a new window. Play when it is done.",
+                Tone::Ok,
+            ),
+            (Err(error), _) => {
+                self.set_status(format!("Couldn't start leonida.exe: {error}"), Tone::Warn)
+            }
+        }
     }
 
-    fn game_section(&mut self, ui: &mut egui::Ui) {
-        theme::section(ui, "Game", Some(self.has_game()));
+    /// Whether `step`'s plate flashes now; starts the flash when Play asked to show it.
+    fn flashing(&mut self, ui: &Ui, step: Step) -> (bool, bool) {
+        let now = ui.input(|i| i.time);
+        let reveal = self.reveal == Some(step);
+        if reveal {
+            self.reveal = None;
+            self.flash = Some((step, now + FLASH));
+            ui.ctx()
+                .request_repaint_after(Duration::from_secs_f64(FLASH));
+        }
+        let flash = self
+            .flash
+            .is_some_and(|(s, until)| s == step && now < until);
+        (flash, reveal)
+    }
+
+    fn step_plate(&mut self, ui: &mut Ui, step: Step, body: impl FnOnce(&mut Self, &mut Ui)) {
+        let (flash, reveal) = self.flashing(ui, step);
+        let ready = match step {
+            Step::Game => self.has_game(),
+            Step::Leonida => self.has_exe(),
+        };
+        let strip = if ready { TEAL } else { SUNSET };
+        let rect = theme::plate(ui, strip, flash, |ui| body(self, ui));
+        if reveal {
+            ui.scroll_to_rect(rect, Some(Align::Center));
+        }
+    }
+
+    fn game_plate(&mut self, ui: &mut Ui) {
+        self.step_plate(ui, Step::Game, Self::game_body);
+    }
+
+    fn game_body(&mut self, ui: &mut Ui) {
+        let ready = self.has_game();
+        theme::plate_header(ui, Some((1, ready)), "Game", |ui| ready_pill(ui, ready));
         if self.settings.game_dir.is_empty() {
             theme::hint(
                 ui,
                 "Find your copy of the game, or pick the folder it was installed to.",
             );
-        } else if self.has_game() {
-            ui.label(RichText::new(&self.game_name).color(FOAM));
-            theme::hint(ui, &self.settings.game_dir);
+        } else if ready {
+            ui.label(
+                RichText::new(&self.game_name)
+                    .text_style(theme::strong())
+                    .color(SAND),
+            );
+            path_label(ui, &self.settings.game_dir);
         } else {
-            let text = format!("No MicrosoftGame.config in {}", self.settings.game_dir);
-            ui.label(RichText::new(text).color(ORANGE));
+            ui.horizontal_top(|ui| {
+                theme::marker(ui, "!", SUNSET, NIGHT);
+                let text = format!("No MicrosoftGame.config in {}", self.settings.game_dir);
+                ui.add(Label::new(RichText::new(text).color(SUNSET)).wrap());
+            });
         }
+        ui.add_space(2.0);
         ui.horizontal_wrapped(|ui| {
             let searching = self.search.is_some();
-            let find = egui::Button::new("Find it automatically");
+            let label = "Find it automatically";
+            let find = if ready {
+                egui::Button::new(label)
+            } else {
+                theme::primary(label)
+            };
             let find = ui
                 .add_enabled(!searching, find)
                 .on_hover_text("Looks through this PC's drives, up to a minute");
@@ -313,14 +439,14 @@ impl Launcher {
         if self.search.is_some() {
             ui.horizontal(|ui| {
                 ui.spinner();
-                theme::hint(ui, "Looking through your drives...");
+                theme::hint(ui, "Looking through your drives, up to a minute...");
             });
         }
         let mut chosen = None;
         for game in &self.found {
             let selected = Path::new(&self.settings.game_dir) == game.dir;
-            let text = format!("{}    {}", game.name, game.dir.display());
-            if ui.selectable_label(selected, text).clicked() {
+            let path = game.dir.display().to_string();
+            if theme::found_row(ui, &game.name, &path, selected).clicked() {
                 chosen = Some(game.dir.clone());
             }
         }
@@ -329,21 +455,30 @@ impl Launcher {
         }
     }
 
-    fn leonida_section(&mut self, ui: &mut egui::Ui) {
-        theme::section(ui, "Leonida", Some(self.has_exe()));
-        if self.has_exe() {
-            theme::hint(ui, &self.settings.leonida_exe);
+    fn leonida_plate(&mut self, ui: &mut Ui) {
+        self.step_plate(ui, Step::Leonida, Self::leonida_body);
+    }
+
+    fn leonida_body(&mut self, ui: &mut Ui) {
+        let ready = self.has_exe();
+        theme::plate_header(ui, Some((2, ready)), "Leonida", |ui| ready_pill(ui, ready));
+        if ready {
+            path_label(ui, &self.settings.leonida_exe);
         } else {
-            theme::hint(
-                ui,
-                "Build leonida.exe (cargo build --release), then find or pick it.",
-            );
+            theme::hint(ui, "Build leonida.exe, then find or pick it.");
+            theme::code_chip(ui, "cargo build --release");
         }
-        ui.horizontal(|ui| {
-            if ui.button("Find it").clicked() {
+        ui.add_space(2.0);
+        ui.horizontal_wrapped(|ui| {
+            let find = if ready {
+                egui::Button::new("Find it")
+            } else {
+                theme::primary("Find it")
+            };
+            if ui.add(find).clicked() {
                 match leonida::find() {
                     Some(exe) => self.set_leonida(exe),
-                    None => self.status = "No leonida.exe found. Pick it yourself.".into(),
+                    None => self.set_status("No leonida.exe found. Pick it yourself.", Tone::Warn),
                 }
             }
             if ui.button("Pick leonida.exe").clicked()
@@ -357,121 +492,173 @@ impl Launcher {
         });
     }
 
-    fn profiles_section(&mut self, ui: &mut egui::Ui) {
-        theme::section(ui, "Profiles", None);
-        if self.profiles.is_empty() {
-            theme::hint(
-                ui,
-                "No profile list: no checkout beside leonida.exe and GitHub didn't answer. You \
-                 can still name one under Extra switches as LEONIDA_PROFILE=name.",
-            );
+    fn profiles_plate(&mut self, ui: &mut Ui) {
+        theme::plate(ui, LINE, false, |ui| self.profiles_body(ui));
+    }
+
+    fn profiles_body(&mut self, ui: &mut Ui) {
+        let ticked = self.ticked_profiles().len();
+        let listed = !self.profiles.is_empty();
+        theme::plate_header(ui, None, "Profiles", |ui| {
+            if ticked > 0 {
+                theme::tag(ui, &format!("Your picks ({ticked})"), FLAMINGO, SAND);
+            } else if listed {
+                theme::hint(ui, "Picks by card");
+            }
+        });
+        if !listed {
+            ui.horizontal_top(|ui| {
+                theme::marker(ui, "i", DRIFTWOOD, NIGHT);
+                let text = "No profile list: no checkout beside leonida.exe and GitHub didn't \
+                            answer. You can still name one under Extra switches as \
+                            LEONIDA_PROFILE=name.";
+                ui.add(Label::new(RichText::new(text).small().color(DRIFTWOOD)).wrap());
+            });
             return;
         }
-        theme::hint(
-            ui,
-            "Leave these unticked and Leonida picks by your graphics card. Ticking any \
-             replaces the card's picks, so tick those too to keep them.",
-        );
-        for profile in &self.profiles {
-            let mut on = self.settings.profiles.contains(&profile.name);
-            let kind = match (profile.local, profile.opt_in) {
-                (true, _) => "your own",
-                (false, true) => "opt-in",
-                (false, false) => "picked by card",
-            };
-            let response = ui
-                .horizontal(|ui| {
-                    let response = ui.checkbox(&mut on, &profile.name);
-                    ui.label(RichText::new(kind).small().color(MUTED));
-                    response
-                })
-                .inner;
-            let response = if profile.measured.is_empty() {
-                response
-            } else {
-                response.on_hover_text(&profile.measured)
-            };
-            if response.changed() {
-                self.settings.profiles.retain(|name| name != &profile.name);
-                if on {
-                    self.settings.profiles.push(profile.name.clone());
+        if ticked == 0 {
+            theme::hint(
+                ui,
+                "Leonida picks by your graphics card. Tick one to choose yourself.",
+            );
+        } else {
+            ui.horizontal_wrapped(|ui| {
+                theme::hint(
+                    ui,
+                    "Your ticks replace the card's picks. Tick those too to keep them.",
+                );
+                if ui.small_button("Use card picks").clicked() {
+                    self.settings.profiles.clear();
+                    self.dirty = true;
                 }
-                self.dirty = true;
+            });
+        }
+        let profiles = &self.profiles;
+        let picks = &mut self.settings.profiles;
+        let mut changed = false;
+        let groups: [ProfileGroup; 2] = [
+            ("Picked by your card", |p| !p.local && !p.opt_in),
+            ("Opt-in", |p| !p.local && p.opt_in),
+        ];
+        for (name, keep) in groups {
+            if profiles.iter().any(keep) {
+                ui.add_space(2.0);
+                ui.label(theme::caption(name));
+                changed |= profile_chips(ui, profiles, picks, keep);
             }
+        }
+        let own = profiles.iter().filter(|p| p.local).count();
+        if own > 0 {
+            let own_ticked = profiles
+                .iter()
+                .filter(|p| p.local && picks.contains(&p.name))
+                .count();
+            let text = if own_ticked > 0 {
+                format!("Your own ({own}), {own_ticked} ticked")
+            } else {
+                format!("Your own ({own})")
+            };
+            ui.add_space(2.0);
+            egui::CollapsingHeader::new(theme::caption(&text))
+                .id_salt("own-profiles")
+                .default_open(false)
+                .show(ui, |ui| {
+                    changed |= profile_chips(ui, profiles, picks, |p| p.local);
+                });
+        }
+        if changed {
+            self.dirty = true;
         }
     }
 
-    fn switches_section(&mut self, ui: &mut egui::Ui) {
-        ui.add_space(14.0);
-        ui.horizontal(|ui| {
-            theme::section_title(ui, "Switches");
-            ui.add_space(6.0);
-            if self.lists.is_some() {
+    fn switches_plate(&mut self, ui: &mut Ui) {
+        theme::plate(ui, LINE, false, |ui| self.switches_body(ui));
+    }
+
+    fn switches_body(&mut self, ui: &mut Ui) {
+        let loading = self.lists.is_some();
+        let mut refresh = false;
+        let from = self.switches_from;
+        theme::plate_header(ui, None, "Switches", |ui| {
+            if loading {
+                theme::hint(ui, "Checking GitHub...");
                 ui.spinner();
-                theme::hint(ui, "checking GitHub for the newest list");
-            } else {
-                let from = ui.label(
-                    RichText::new(self.switches_from.describe())
-                        .small()
-                        .color(MUTED),
-                );
-                from.on_hover_text(self.switches_from.explain());
-                if ui.small_button("Refresh").clicked() {
-                    self.lists = Some(background(ui.ctx(), remote::load));
-                }
+                return;
             }
+            refresh = ui.small_button("Refresh").clicked();
+            let text = RichText::new(from.describe()).small().color(DRIFTWOOD);
+            ui.add(Label::new(text).truncate().show_tooltip_when_elided(false))
+                .on_hover_text(from.explain());
+            let (dot, _) = ui.allocate_exact_size(vec2(8.0, 8.0), Sense::hover());
+            let color = match from {
+                Source::GitHub => TEAL,
+                Source::LastDownload => SUNSET,
+                Source::BuiltIn => DRIFTWOOD,
+            };
+            ui.painter().circle_filled(dot.center(), 4.0, color);
         });
+        if refresh {
+            self.lists = Some(background(ui.ctx(), remote::load));
+        }
         theme::hint(
             ui,
-            "default keeps what the profiles set. Changed ones are orange. A build without a \
-             switch ignores it. Hover a name to see what it does.",
+            "All start with LEONIDA_. default keeps what the profiles set.",
         );
-        ui.add_space(2.0);
-        egui::Grid::new("switches")
-            .num_columns(3)
-            .striped(true)
-            .spacing([16.0, 6.0])
-            .show(ui, |ui| {
-                for switch in &self.switches {
-                    let current = self
-                        .settings
-                        .switches
-                        .get(&switch.name)
-                        .cloned()
-                        .unwrap_or_default();
-                    let mut value = current.clone();
-                    let color = if current.is_empty() { FOAM } else { ORANGE };
-                    let name = RichText::new(format!("LEONIDA_{}", switch.name)).color(color);
-                    let name = ui.label(name);
-                    if !switch.about.is_empty() {
-                        name.on_hover_text(&switch.about);
-                    }
-                    egui::ComboBox::from_id_salt(&switch.name)
-                        .selected_text(RichText::new(shown(&value)).color(color))
-                        .show_ui(ui, |ui| {
-                            ui.selectable_value(&mut value, String::new(), "default");
-                            for choice in &switch.values {
-                                ui.selectable_value(&mut value, choice.clone(), shown(choice));
-                            }
-                        });
-                    if switch.build.is_empty() {
-                        ui.label("");
-                    } else {
-                        theme::hint(ui, &format!("needs the {} build", switch.build));
-                    }
-                    ui.end_row();
-                    if value != current {
-                        if value.is_empty() {
-                            self.settings.switches.remove(&switch.name);
-                        } else {
-                            self.settings.switches.insert(switch.name.clone(), value);
-                        }
-                        self.dirty = true;
-                    }
+        let changed = self.changed_switches();
+        if changed > 0 {
+            ui.horizontal(|ui| {
+                theme::pill(ui, &format!("{changed} changed"), SUNSET);
+                if ui.small_button("Reset all").clicked() {
+                    self.settings.switches.clear();
+                    self.dirty = true;
                 }
             });
+        }
+        ui.add_space(2.0);
+        let switches = &self.switches;
+        let values = &mut self.settings.switches;
+        let mut dirty = false;
+        ui.scope(|ui| {
+            ui.spacing_mut().item_spacing.y = 2.0;
+            for (row, switch) in switches.iter().filter(|s| s.build.is_empty()).enumerate() {
+                dirty |= switch_row(ui, switch, values, row % 2 == 1);
+            }
+        });
+        let tests: Vec<&Switch> = switches.iter().filter(|s| !s.build.is_empty()).collect();
+        if !tests.is_empty() {
+            let changed = tests
+                .iter()
+                .filter(|s| values.get(&s.name).is_some_and(|v| !v.is_empty()))
+                .count();
+            let count = tests.len();
+            let text = if changed > 0 {
+                format!("Test builds ({count}), {changed} changed")
+            } else {
+                format!("Test builds ({count})")
+            };
+            ui.add_space(4.0);
+            egui::CollapsingHeader::new(theme::caption(&text))
+                .id_salt("test-builds")
+                .default_open(changed > 0)
+                .show(ui, |ui| {
+                    theme::hint(ui, "Need a branch build. Main builds ignore them.");
+                    ui.spacing_mut().item_spacing.y = 2.0;
+                    for (row, switch) in tests.iter().enumerate() {
+                        dirty |= switch_row(ui, switch, values, row % 2 == 1);
+                    }
+                });
+        }
+        if dirty {
+            self.dirty = true;
+        }
+    }
 
-        theme::section(ui, "Extra switches", None);
+    fn extra_plate(&mut self, ui: &mut Ui) {
+        theme::plate(ui, LINE, false, |ui| self.extra_body(ui));
+    }
+
+    fn extra_body(&mut self, ui: &mut Ui) {
+        theme::plate_header(ui, None, "Extra switches", |_| {});
         theme::hint(
             ui,
             "One NAME=value per line for switches not in the list. # starts a comment.",
@@ -480,66 +667,326 @@ impl Launcher {
             .desired_rows(3)
             .desired_width(f32::INFINITY)
             .hint_text("LEONIDA_EXAMPLE=1")
-            .font(egui::TextStyle::Monospace);
-        if ui.add(extra).changed() {
+            .font(egui::TextStyle::Monospace)
+            .frame(Frame::NONE);
+        if well(ui, |ui| ui.add(extra)).changed() {
             self.dirty = true;
         }
-
-        ui.add_space(10.0);
-        egui::CollapsingHeader::new("Run command").show(ui, |ui| {
-            theme::hint(
-                ui,
-                "What Play runs, as PowerShell. Copy it into a test report.",
-            );
-            let mut script = self.powershell(PLAY);
-            let mut shown_script = script.as_str();
-            ui.add(
-                egui::TextEdit::multiline(&mut shown_script)
-                    .desired_width(f32::INFINITY)
-                    .font(egui::TextStyle::Monospace),
-            );
-            if ui.button("Copy run command").clicked() {
-                ui.ctx().copy_text(std::mem::take(&mut script));
-                self.status = "Copied the run command.".into();
-            }
-        });
-        ui.add_space(12.0);
+        ui.add_space(2.0);
+        egui::CollapsingHeader::new(theme::caption("Run command"))
+            .id_salt("run-command")
+            .show(ui, |ui| {
+                theme::hint(
+                    ui,
+                    "What Play runs, as PowerShell. Copy it into a test report.",
+                );
+                let mut script = self.powershell(PLAY);
+                let mut shown_script = script.as_str();
+                well(ui, |ui| {
+                    ui.add(
+                        egui::TextEdit::multiline(&mut shown_script)
+                            .desired_width(f32::INFINITY)
+                            .font(egui::TextStyle::Monospace)
+                            .frame(Frame::NONE),
+                    )
+                });
+                if ui.button("Copy run command").clicked() {
+                    ui.ctx().copy_text(std::mem::take(&mut script));
+                    self.set_status("Copied the run command.", Tone::Ok);
+                }
+            });
     }
 
-    fn run_bar(&mut self, ui: &mut egui::Ui) {
-        let ready = self.has_exe() && self.has_game();
-        ui.horizontal(|ui| {
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                let play = theme::play_button(ui, ready);
-                let play = if ready {
-                    play.on_hover_text("Starts the game with the choices above")
-                } else {
-                    play.on_hover_text("Pick the game folder and leonida.exe first")
-                };
-                if play.clicked() {
-                    self.launch(PLAY);
-                }
-                let warm = ui.add_enabled(ready, egui::Button::new("Warm up shaders"));
-                let warm = warm.on_hover_text(
-                    "Translates the game's shaders before playing, a few minutes. Do it once \
-                     after each new build and after changing a shader switch.",
-                );
-                if warm.clicked() {
-                    self.launch(WARM_UP);
-                }
-                ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
-                    let text = if !self.status.is_empty() {
-                        self.status.clone()
-                    } else if ready {
-                        "Ready to play.".into()
+    /// The plates, in two columns when there is room for them.
+    fn board(&mut self, ui: &mut Ui) {
+        let area = ui.max_rect();
+        ui.painter()
+            .add(theme::vgradient(area, &[(0.0, NIGHT_TOP), (1.0, NIGHT)]));
+        egui::ScrollArea::vertical()
+            .auto_shrink(false)
+            .show(ui, |ui| {
+                let available = ui.available_width();
+                let content = (available - 48.0).min(1180.0);
+                let margin = ((available - content) / 2.0).max(24.0);
+                ui.add_space(18.0);
+                ui.horizontal_top(|ui| {
+                    ui.add_space(margin);
+                    if content >= 700.0 {
+                        let left = (content * 0.45).floor();
+                        let right = content - left - 16.0;
+                        ui.spacing_mut().item_spacing.x = 16.0;
+                        column(ui, left, |ui| {
+                            self.game_plate(ui);
+                            ui.add_space(PLATE_GAP);
+                            self.leonida_plate(ui);
+                            ui.add_space(PLATE_GAP);
+                            self.profiles_plate(ui);
+                        });
+                        column(ui, right, |ui| {
+                            self.switches_plate(ui);
+                            ui.add_space(PLATE_GAP);
+                            self.extra_plate(ui);
+                        });
                     } else {
-                        "Pick the game folder and leonida.exe to play.".into()
-                    };
-                    ui.add(egui::Label::new(RichText::new(text).color(MUTED)).wrap());
+                        column(ui, content, |ui| {
+                            self.game_plate(ui);
+                            ui.add_space(PLATE_GAP);
+                            self.leonida_plate(ui);
+                            ui.add_space(PLATE_GAP);
+                            self.profiles_plate(ui);
+                            ui.add_space(PLATE_GAP);
+                            self.switches_plate(ui);
+                            ui.add_space(PLATE_GAP);
+                            self.extra_plate(ui);
+                        });
+                    }
                 });
+                ui.add_space(28.0);
+            });
+        let fade = Rect::from_min_max(pos2(area.left(), area.bottom() - 24.0), area.max);
+        let stops = [(0.0, Color32::TRANSPARENT), (1.0, NIGHT)];
+        ui.painter().add(theme::vgradient(fade, &stops));
+    }
+
+    /// What a run will use, in a few words.
+    fn summary(&self) -> String {
+        let ticked = self.ticked_profiles();
+        let mut text = if ticked.is_empty() {
+            "Card picks".to_string()
+        } else {
+            ticked.join(", ")
+        };
+        match self.changed_switches() {
+            0 => text += ", no switch changes",
+            1 => text += ", 1 switch changed",
+            n => {
+                let _ = write!(text, ", {n} switches changed");
+            }
+        }
+        match self.extra_lines().len() {
+            0 => {}
+            1 => text += ", 1 extra line",
+            n => {
+                let _ = write!(text, ", {n} extra lines");
+            }
+        }
+        text
+    }
+
+    fn run_bar(&mut self, ui: &mut Ui) {
+        let rect = ui.max_rect();
+        let painter = ui.painter();
+        painter.add(theme::vgradient(rect, &[(0.0, NIGHT_TOP), (1.0, NIGHT)]));
+        theme::neon_line(painter, rect);
+        let (has_game, has_exe) = (self.has_game(), self.has_exe());
+        let ready = has_game && has_exe;
+        let inner = rect.shrink2(vec2(24.0, 12.0));
+        let layout = Layout::right_to_left(Align::Center);
+        ui.scope_builder(UiBuilder::new().max_rect(inner).layout(layout), |ui| {
+            let play = theme::play_button(ui, ready);
+            let play = if ready {
+                play.on_hover_text("Starts the game with the choices above")
+            } else if !has_game {
+                play.on_hover_text("Pick the game folder first. Click to show where.")
+            } else {
+                play.on_hover_text("Pick leonida.exe first. Click to show where.")
+            };
+            if play.clicked() {
+                if ready {
+                    self.launch(PLAY);
+                } else {
+                    self.reveal = Some(if has_game { Step::Leonida } else { Step::Game });
+                }
+            }
+            ui.add_space(4.0);
+            let warm = theme::outline_pill(ui, "Warm up shaders", ready);
+            let warm = warm.on_hover_text(
+                "Translates the game's shaders before playing, a few minutes. Do it once \
+                 after each new build and after changing a shader switch.",
+            );
+            if warm.clicked() {
+                self.launch(WARM_UP);
+            }
+            ui.add_space(8.0);
+            ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
+                self.status_block(ui, has_game, has_exe);
             });
         });
     }
+
+    fn status_block(&self, ui: &mut Ui, has_game: bool, has_exe: bool) {
+        let (text, tone) = if !self.status.is_empty() {
+            (self.status.as_str(), self.status_tone)
+        } else {
+            match (has_game, has_exe) {
+                (true, true) => ("Ready to play.", Tone::Ok),
+                (false, true) => ("Pick the game folder to play.", Tone::Warn),
+                (true, false) => ("Pick leonida.exe to play.", Tone::Warn),
+                (false, false) => ("Pick the game folder and leonida.exe to play.", Tone::Warn),
+            }
+        };
+        let (dot, color) = match tone {
+            Tone::Ok => (TEAL, TEAL),
+            Tone::Warn => (SUNSET, SUNSET),
+            Tone::Info => (DRIFTWOOD, SAND),
+        };
+        let width = ui.available_width();
+        let font = egui::TextStyle::Body.resolve(ui.style());
+        let galley = ui
+            .painter()
+            .layout(text.to_string(), font, color, (width - 17.0).max(40.0));
+        let one_line = galley.rows.len() <= 1;
+        ui.vertical(|ui| {
+            ui.spacing_mut().item_spacing.y = 2.0;
+            ui.horizontal_top(|ui| {
+                ui.spacing_mut().item_spacing.x = 8.0;
+                let (spot, _) =
+                    ui.allocate_exact_size(vec2(9.0, galley.rows[0].height()), Sense::hover());
+                ui.painter().circle_filled(spot.center(), 4.5, dot);
+                ui.add(Label::new(galley));
+            });
+            if one_line {
+                let summary = RichText::new(self.summary()).small().color(DRIFTWOOD);
+                ui.horizontal(|ui| {
+                    ui.add_space(17.0);
+                    ui.add(Label::new(summary).truncate());
+                });
+            }
+        });
+    }
+}
+
+/// A Ready or Needed pill for a step plate's header.
+fn ready_pill(ui: &mut Ui, ready: bool) {
+    if ready {
+        theme::pill(ui, "Ready", TEAL);
+    } else {
+        theme::pill(ui, "Needed", SUNSET);
+    }
+}
+
+/// A path on one line, cut short when it doesn't fit; the whole path shows on hover.
+fn path_label(ui: &mut Ui, path: &str) {
+    let text = RichText::new(path).small().color(DRIFTWOOD);
+    ui.add(Label::new(text).truncate());
+}
+
+/// A dark well for text, the extra switches and the run command.
+fn well<R>(ui: &mut Ui, add: impl FnOnce(&mut Ui) -> R) -> R {
+    Frame::new()
+        .fill(INSET)
+        .stroke(Stroke::new(1.0, LINE))
+        .corner_radius(8)
+        .inner_margin(Margin::same(8))
+        .show(ui, add)
+        .inner
+}
+
+/// A column of the board, `width` wide.
+fn column(ui: &mut Ui, width: f32, add: impl FnOnce(&mut Ui)) {
+    ui.allocate_ui_with_layout(vec2(width, 0.0), Layout::top_down(Align::Min), |ui| {
+        ui.set_width(width);
+        ui.spacing_mut().item_spacing.x = 8.0;
+        add(ui);
+    });
+}
+
+/// A caption and the profiles under it.
+type ProfileGroup = (&'static str, fn(&Profile) -> bool);
+
+/// Chips for the profiles `keep` accepts. Returns whether a tick changed.
+fn profile_chips(
+    ui: &mut Ui,
+    profiles: &[Profile],
+    picks: &mut Vec<String>,
+    keep: impl Fn(&Profile) -> bool,
+) -> bool {
+    let mut changed = false;
+    ui.horizontal_wrapped(|ui| {
+        ui.spacing_mut().item_spacing = vec2(6.0, 6.0);
+        for profile in profiles.iter().filter(|p| keep(p)) {
+            let mut on = picks.contains(&profile.name);
+            let response = theme::chip(ui, &profile.name, &mut on);
+            let response = if profile.measured.is_empty() {
+                response
+            } else {
+                response.on_hover_text(&profile.measured)
+            };
+            if response.changed() {
+                picks.retain(|name| name != &profile.name);
+                if on {
+                    picks.push(profile.name.clone());
+                }
+                changed = true;
+            }
+        }
+    });
+    changed
+}
+
+/// One switch: its name and a drop-down of its values. Returns whether the value changed.
+fn switch_row(
+    ui: &mut Ui,
+    switch: &Switch,
+    values: &mut BTreeMap<String, String>,
+    odd: bool,
+) -> bool {
+    let current = values.get(&switch.name).cloned().unwrap_or_default();
+    let mut value = current.clone();
+    let color = if current.is_empty() { SAND } else { SUNSET };
+    let fill = if odd { PLATE_ALT } else { PLATE };
+    let row = Frame::new()
+        .fill(fill)
+        .corner_radius(6)
+        .inner_margin(Margin::symmetric(10, 4))
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.horizontal(|ui| {
+                let name = ui
+                    .vertical(|ui| {
+                        ui.spacing_mut().item_spacing.y = 2.0;
+                        let name = RichText::new(&switch.name).monospace().color(color);
+                        let name = ui.label(name);
+                        if !switch.build.is_empty() {
+                            let build = format!("needs {}", switch.build);
+                            theme::tag(ui, &build, LINE, DRIFTWOOD);
+                        }
+                        name
+                    })
+                    .inner;
+                let about = if switch.about.is_empty() {
+                    format!("LEONIDA_{}", switch.name)
+                } else {
+                    format!("LEONIDA_{}\n{}", switch.name, switch.about)
+                };
+                name.on_hover_text(about);
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    egui::ComboBox::from_id_salt(&switch.name)
+                        .width(130.0)
+                        .selected_text(RichText::new(shown(&value)).color(color))
+                        .show_ui(ui, |ui| {
+                            ui.selectable_value(&mut value, String::new(), "default");
+                            for choice in &switch.values {
+                                ui.selectable_value(&mut value, choice.clone(), shown(choice));
+                            }
+                        });
+                });
+            });
+        });
+    if !current.is_empty() {
+        let rect = row.response.rect;
+        let bar = Rect::from_min_size(rect.min, vec2(3.0, rect.height()));
+        ui.painter().rect_filled(bar, 1.5, SUNSET);
+    }
+    if value == current {
+        return false;
+    }
+    if value.is_empty() {
+        values.remove(&switch.name);
+    } else {
+        values.insert(switch.name.clone(), value);
+    }
+    true
 }
 
 fn shown(value: &str) -> String {
@@ -554,36 +1001,36 @@ fn shown(value: &str) -> String {
 impl eframe::App for Launcher {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         self.poll();
+        let full = ui.ctx().content_rect();
+        let header = if full.height() < 700.0 {
+            124.0
+        } else {
+            (full.width() * 0.24).clamp(160.0, 210.0)
+        };
+        let ready = self.has_exe() && self.has_game();
+        egui::Panel::top("scene")
+            .exact_size(header)
+            .resizable(false)
+            .show_separator_line(false)
+            .frame(Frame::NONE)
+            .show(ui, |ui| {
+                let rect = ui.max_rect();
+                ui.allocate_rect(rect, Sense::hover());
+                art::scene(&ui.painter_at(rect), rect, ready);
+            });
         egui::Panel::bottom("run")
-            .frame(
-                Frame::new()
-                    .fill(theme::BAY)
-                    .inner_margin(Margin::symmetric(24, 14)),
-            )
+            .exact_size(76.0)
+            .resizable(false)
+            .show_separator_line(false)
+            .frame(Frame::NONE)
             .show(ui, |ui| self.run_bar(ui));
         egui::CentralPanel::default()
-            .frame(
-                Frame::new()
-                    .fill(theme::NIGHT)
-                    .inner_margin(Margin::symmetric(24, 18)),
-            )
-            .show(ui, |ui| {
-                ui.heading("Leonida Launcher");
-                theme::hint(ui, "Pick your game, choose switches, play.");
-                egui::ScrollArea::vertical()
-                    .auto_shrink(false)
-                    .show(ui, |ui| {
-                        ui.set_max_width(720.0);
-                        self.game_section(ui);
-                        self.leonida_section(ui);
-                        self.profiles_section(ui);
-                        self.switches_section(ui);
-                    });
-            });
+            .frame(Frame::NONE)
+            .show(ui, |ui| self.board(ui));
         if self.dirty {
             self.dirty = false;
             if let Err(error) = self.settings.save() {
-                self.status = format!("Couldn't save the settings: {error}");
+                self.set_status(format!("Couldn't save the settings: {error}"), Tone::Warn);
             }
         }
     }
