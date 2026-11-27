@@ -24,6 +24,8 @@ pub struct Settings {
     pub later_build: u64,
     /// The leonida.exe in use before the last ready-made build was installed, for going back.
     pub previous_leonida: String,
+    /// A newly installed leonida.exe whose shaders aren't warmed up yet, or empty.
+    pub warm_pending: String,
 }
 
 impl Settings {

@@ -40,30 +40,43 @@ The launcher looks on GitHub for news when it opens, and again when you come bac
 after an hour or more. *Check for updates now* under About asks at once. Nothing is installed
 unless you click it, and *Later* hides an update until a newer one comes out.
 
+When both a new launcher and a new Leonida build are out, one row *2 UPDATES ARE OUT* holds both.
+
 - **The launcher itself:** when a newer release of this repository is out, a row *LAUNCHER x.y.z
-  IS OUT* shows under START. *Update now* downloads `leonida-launcher.exe`, checks it against the
-  release's SHA-256, puts it in place of the old one and starts it. Your settings stay. If the
-  launcher's folder can't be written to (for example under Program Files), it saves the checked
-  file in `%LOCALAPPDATA%\leonida-launcher\update` and opens the release page: close the launcher
-  and copy that file over the old one.
+  IS OUT* shows under START. *Update now* downloads `leonida-launcher.exe`, checks that it is the
+  release's own file (by its SHA-256), puts it in place of the old one and starts it. Your
+  settings stay. The old launcher is deleted only once the new one's window has opened; if the
+  new one doesn't start, the old one comes back. If Windows doesn't let the launcher replace its
+  own file (for example under Program Files), it saves the checked file in
+  `%LOCALAPPDATA%\leonida-launcher\update` and shows it in Explorer: close the launcher and copy
+  that file over the old one. About repeats these steps until it's done.
+
+  **Launcher 0.2.0 has no updater.** If you have it, download the newest `leonida-launcher.exe`
+  from the [releases page](https://github.com/ProjectLeonidaL/Leonida-launcher/releases) once
+  and put it in place of the old one. Every launcher from then on updates itself.
 - **Leonida Legacy:** every change merged into Leonida's `main` is published as a ready-made
   build (*Build N*, a small zip with `leonida.exe`). The launcher asks `leonida.exe version` which
   build you have and compares it with the newest one:
   - No leonida.exe yet: *Download Leonida* gets the newest build. Finding or picking your own
-    build still works.
+    build still works. Without internet, *Try again* asks GitHub once you're online.
   - An older ready-made build: a row *LEONIDA BUILD N IS OUT* offers the update. The build you
-    had stays, so *Use the previous build* goes back to it; older ones are deleted.
-  - Your own build from a checkout: the Leonida row says so and names the newest ready-made
-    build. *Use ready-made builds* switches to them; *Update my checkout* asks first, then opens a
-    window that runs `git pull --ff-only` and `cargo build --release -p leonida` in your checkout.
-    It stops and changes nothing if you edited files there.
+    had stays, so *Go back to build M* on the Leonida row returns to it, and the update isn't
+    offered again until a newer one comes out. Older builds are deleted.
+  - Your own build: the Leonida row says so and names the newest ready-made build. *Use
+    ready-made builds* switches to them. When it was built in a git checkout, *Update my
+    checkout* asks first (naming the branch), then opens a window that runs `git pull --ff-only`
+    and `cargo build --release -p leonida` there. It stops and changes nothing if you edited
+    files, and warns when the checkout isn't on `main`.
 
-  Builds go to `%LOCALAPPDATA%\leonida-launcher\builds`. Your game folder reaches every build the
-  same way, so nothing has to be set again. A new build translates the shaders again: warm them
-  up once before you play.
+  Builds go to `%LOCALAPPDATA%\leonida-launcher\builds`; nothing is installed in Windows. The
+  launcher installs a build only when the release gives its SHA-256 and the zip holds nothing
+  outside its `leonida` folder. Your game folder reaches every build the same way, so nothing has
+  to be set again. A new build translates the shaders again: warm them up once before you play.
 
 For updates the launcher asks only GitHub's release pages of these two repositories, and sends
 nothing about you or your PC. The last answer is kept in `%LOCALAPPDATA%\leonida-launcher\cache`.
+GitHub answers 60 questions an hour from one internet address; when that runs out, the launcher
+waits an hour before it asks again.
 
 ## Build
 

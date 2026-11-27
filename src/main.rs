@@ -37,7 +37,6 @@ const FORKED_FROM: &str = "https://github.com/fxceless/victory-gta6";
 const VICTORY: &str = "https://github.com/Marvisak/VIctory";
 
 fn main() {
-    update::tidy();
     let started = tauri::Builder::default()
         .manage(Mutex::new(Launcher::new()))
         .manage(trial::Shared::default())
@@ -90,18 +89,38 @@ fn main() {
             use_previous,
             update_checkout,
             open_release,
+            show_launcher_file,
         ])
         .run(tauri::generate_context!());
     if let Err(error) = started {
-        rfd::MessageDialog::new()
+        let text = format!(
+            "The launcher window couldn't open: {error}\n\nIt needs Microsoft Edge WebView2, \
+             which is part of Windows 11. On Windows 10, install the WebView2 Runtime from \
+             Microsoft, then start the launcher again."
+        );
+        let dialog = rfd::MessageDialog::new()
             .set_level(rfd::MessageLevel::Error)
-            .set_title("Leonida Launcher")
+            .set_title("Leonida Launcher");
+        if !update::can_go_back() {
+            dialog.set_description(text).show();
+            return;
+        }
+        // Only after a self-update: the launcher it replaced is still there as .old.
+        let answer = dialog
             .set_description(format!(
-                "The launcher window couldn't open: {error}\n\nIt needs Microsoft Edge WebView2, \
-                 which is part of Windows 11. On Windows 10, install the WebView2 Runtime from \
-                 Microsoft, then start the launcher again."
+                "{text}\n\nThis launcher was just updated. Go back to the previous launcher?"
             ))
+            .set_buttons(rfd::MessageButtons::YesNo)
             .show();
+        if answer == rfd::MessageDialogResult::Yes
+            && let Err(problem) = update::go_back()
+        {
+            rfd::MessageDialog::new()
+                .set_level(rfd::MessageLevel::Error)
+                .set_title("Leonida Launcher")
+                .set_description(problem)
+                .show();
+        }
     }
 }
 
@@ -189,6 +208,22 @@ impl Launcher {
 
     fn has_game(&self) -> bool {
         game_dir::has_config(Path::new(&self.settings.game_dir))
+    }
+
+    /// Forgets the reminder to warm up a new build once a warm-up has started.
+    fn warmed(&mut self) {
+        if !self.settings.warm_pending.is_empty() {
+            self.settings.warm_pending.clear();
+            let _ = self.save();
+        }
+    }
+
+    /// Refuses while a ready-made build downloads: putting it in place deletes older builds.
+    fn not_installing(&self) -> Result<(), String> {
+        if self.updates.busy == "leonida" {
+            return Err("A Leonida build is downloading. Wait until it is in place.".into());
+        }
+        Ok(())
     }
 
     fn reload_profiles(&mut self) {
@@ -328,8 +363,11 @@ fn stopped(error: impl std::fmt::Display) -> String {
     format!("That stopped unexpectedly ({error}). Try again.")
 }
 
+/// The window asks for this once it has loaded, which is also when the launcher counts as started
+/// after an update.
 #[tauri::command]
 fn view(state: State<'_, Shared>, trials: State<'_, trial::Shared>) -> View {
+    update::started();
     let mut launcher = lock(&state);
     let mut view = launcher.view();
     view.notice = launcher.notice.take();
@@ -444,6 +482,7 @@ async fn pick_game(state: State<'_, Shared>, exe: bool) -> Result<Picked, String
 /// Looks beside the launcher and through Downloads, which can be slow on a synced folder.
 #[tauri::command]
 async fn find_leonida(state: State<'_, Shared>) -> Result<View, String> {
+    lock(&state).not_installing()?;
     let found = spawn_blocking(leonida::find).await.map_err(stopped)?;
     let Some(exe) = found else {
         return Err(
@@ -453,12 +492,14 @@ async fn find_leonida(state: State<'_, Shared>) -> Result<View, String> {
         );
     };
     let mut launcher = lock(&state);
+    launcher.not_installing()?;
     launcher.set_leonida(&exe)?;
     Ok(launcher.view())
 }
 
 #[tauri::command]
 async fn pick_leonida(state: State<'_, Shared>) -> Result<Picked, String> {
+    lock(&state).not_installing()?;
     let picked = spawn_blocking(|| {
         rfd::FileDialog::new()
             .set_title("leonida.exe")
@@ -469,6 +510,7 @@ async fn pick_leonida(state: State<'_, Shared>) -> Result<Picked, String> {
     .map_err(stopped)?;
     let mut launcher = lock(&state);
     if let Some(exe) = &picked {
+        launcher.not_installing()?;
         launcher.set_leonida(exe)?;
     }
     Ok(Picked {
@@ -480,7 +522,7 @@ async fn pick_leonida(state: State<'_, Shared>) -> Result<Picked, String> {
 /// Opens Leonida Legacy's build steps in the browser.
 #[tauri::command]
 fn open_build_steps() -> Result<(), String> {
-    Command::new("explorer.exe")
+    Command::new(pc::windows_tool("explorer.exe"))
         .arg(BUILD_STEPS)
         .spawn()
         .map(drop)
@@ -498,7 +540,7 @@ fn open_credit(which: String) -> Result<(), String> {
         "victory" => VICTORY,
         _ => return Err(format!("There's no credit called {which}.")),
     };
-    Command::new("explorer.exe")
+    Command::new(pc::windows_tool("explorer.exe"))
         .arg(url)
         .spawn()
         .map(drop)
@@ -548,6 +590,7 @@ async fn launch(
         if !launcher.has_exe() {
             return Err("Pick leonida.exe first.".into());
         }
+        launcher.not_installing()?;
         launcher.starts.claim()?;
     }
     let running = spawn_blocking(leonida::running).await.unwrap_or(false);
@@ -558,7 +601,7 @@ async fn launch(
     }
     let exe = launcher.exe();
     // cmd /k keeps the window, and leonida.exe's log in it, open after the run ends.
-    let spawned = Command::new("cmd.exe")
+    let spawned = Command::new(pc::windows_tool("cmd.exe"))
         .raw_arg(format!("/k \"\"{}\" {args}\"", exe.display()))
         .current_dir(leonida::folder(&exe))
         .envs(launcher.run().env())
@@ -567,7 +610,7 @@ async fn launch(
     launcher.starts.end(spawned.is_ok());
     spawned.map_err(|error| format!("Couldn't start leonida.exe: {error}"))?;
     if what == "warm" {
-        launcher.updates.warm = false;
+        launcher.warmed();
     }
     Ok(done.into())
 }
@@ -622,6 +665,7 @@ async fn test_start(
         if !launcher.has_exe() {
             return Err("Leonida can't find leonida.exe any more. Pick it again.".into());
         }
+        launcher.not_installing()?;
         launcher.starts.claim()?;
     }
     let running = spawn_blocking(leonida::running).await.unwrap_or(false);
@@ -633,6 +677,9 @@ async fn test_start(
     let exe = launcher.exe();
     let started = trial::start(&trials, warm, &exe, &launcher.settings.game_dir, app);
     launcher.starts.end(started.is_ok());
+    if warm && started.is_ok() {
+        launcher.warmed();
+    }
     started
 }
 
@@ -710,6 +757,16 @@ fn open_tests() -> Result<(), String> {
 /// leonida.exe which build it is. Off the UI thread: up to 15 s without network.
 #[tauri::command]
 async fn check_updates(state: State<'_, Shared>, now: bool) -> Result<View, String> {
+    // Asked while an unasked check runs: wait for it, so the answer shown is a new one.
+    for _ in 0..100 {
+        let checking = now && lock(&state).updates.checking;
+        if !checking {
+            break;
+        }
+        spawn_blocking(|| std::thread::sleep(Duration::from_millis(200)))
+            .await
+            .map_err(stopped)?;
+    }
     let (saved, exe, look) = {
         let mut launcher = lock(&state);
         let exe = launcher.exe();
@@ -740,71 +797,133 @@ async fn check_updates(state: State<'_, Shared>, now: bool) -> Result<View, Stri
     Ok(launcher.view())
 }
 
-/// Downloads the newer launcher, checks it, puts it in place of this one and starts it.
+/// What Update now did: `restarting` when the new launcher starts and this one closes, otherwise
+/// `text` says what the player does next.
+#[derive(Serialize)]
+struct Updated {
+    restarting: bool,
+    text: String,
+}
+
+fn open_url(url: &str) -> Result<(), String> {
+    Command::new(pc::windows_tool("explorer.exe"))
+        .arg(url)
+        .spawn()
+        .map(drop)
+        .map_err(|error| format!("Couldn't open the browser ({error}). The page is {url}"))
+}
+
+/// Opens the file's folder in Explorer with the file selected.
+fn show_file(file: &Path) -> Result<(), String> {
+    Command::new(pc::windows_tool("explorer.exe"))
+        .raw_arg(format!("/select,\"{}\"", file.display()))
+        .spawn()
+        .map(drop)
+        .map_err(|error| format!("Couldn't open the folder ({error})."))
+}
+
+/// Downloads the newer launcher, checks it, puts it in place of this one and starts it. This one
+/// closes once the new one's window has loaded, and comes back if the new one doesn't start.
 #[tauri::command]
 async fn update_launcher(
     app: tauri::AppHandle,
     state: State<'_, Shared>,
     trials: State<'_, trial::Shared>,
-) -> Result<String, String> {
+) -> Result<Updated, String> {
     if trial::running(&trials) {
         return Err("A test run is going. Finish it in Test a setting first.".into());
     }
     let offer = {
+        let launcher = lock(&state);
+        if !launcher.updates.busy.is_empty() {
+            return Err("An update is downloading already.".into());
+        }
+        update::launcher_offer(&launcher.updates.saved.launcher, update::VERSION)
+            .ok_or("This launcher is the newest one.")?
+    };
+    if let Some(problem) = update::cannot_check(&offer.exe, offer.checksum.as_ref()) {
+        let _ = open_url(&update::page_or_list(&offer.page, update::LAUNCHER));
+        return Err(problem.into());
+    }
+    {
         let mut launcher = lock(&state);
         if !launcher.updates.busy.is_empty() {
             return Err("An update is downloading already.".into());
         }
-        let offer = update::launcher_offer(&launcher.updates.saved.launcher, update::VERSION)
-            .ok_or("This launcher is the newest one.")?;
         launcher.updates.busy = "launcher";
-        offer
-    };
-    let page = update::page_or_list(&offer.page, update::LAUNCHER);
-    let fetched = spawn_blocking(move || update::fetch_launcher(&offer)).await;
+    }
+    let fetched = spawn_blocking(move || {
+        let fetched = update::fetch_launcher(&offer)?;
+        if let update::Fetched::Swapped(exe) = &fetched {
+            update::start_new(exe)?;
+        }
+        Ok::<_, String>(fetched)
+    })
+    .await;
     lock(&state).updates.busy = "";
     match fetched.map_err(stopped)?? {
-        update::Fetched::Swapped(exe) => {
-            if let Err(error) = Command::new(&exe).spawn() {
-                update::undo_swap(&exe);
-                return Err(format!(
-                    "The new launcher didn't start ({error}), so this one stays. Try again later."
-                ));
-            }
+        update::Fetched::Swapped(_) => {
             std::thread::spawn(move || {
-                std::thread::sleep(Duration::from_millis(400));
+                std::thread::sleep(Duration::from_millis(200));
                 app.exit(0);
             });
-            Ok("Starting the new launcher...".into())
+            Ok(Updated {
+                restarting: true,
+                text: "Starting the new launcher...".into(),
+            })
         }
         update::Fetched::ByHand(file) => {
-            let _ = Command::new("explorer.exe").arg(&page).spawn();
-            Ok(format!(
-                "The launcher can't replace itself: Windows doesn't let it write to its own \
-                 folder. The new launcher is downloaded and checked as {}. Close this launcher \
-                 and copy that file over the old one. The release page is open in your browser \
-                 too.",
-                file.display()
-            ))
+            let _ = show_file(&file);
+            Ok(Updated {
+                restarting: false,
+                text: by_hand_steps(&file),
+            })
         }
     }
 }
 
-/// Hides the offer of the newest launcher ("launcher") or Leonida build ("leonida") until a
-/// newer one comes out.
-#[tauri::command]
+/// The steps for putting a downloaded launcher in place by hand.
+fn by_hand_steps(file: &Path) -> String {
+    let exe = std::env::current_exe().map_or_else(
+        |_| "the old leonida-launcher.exe".into(),
+        |exe| exe.display().to_string(),
+    );
+    format!(
+        "The launcher couldn't replace itself: Windows doesn't let it change its own file. The \
+         new launcher is downloaded and checked as {}, and its folder is open. Close this \
+         launcher, then copy that file over {exe}. About shows these steps until it's done.",
+        file.display()
+    )
+}
+
+/// Shows the downloaded launcher waiting to be copied by hand in Explorer.
+#[tauri::command(async)]
+fn show_launcher_file() -> Result<(), String> {
+    let file = update::waiting_by_hand().ok_or(
+        "The new launcher isn't waiting in the update folder any more. Check for updates under \
+         About.",
+    )?;
+    show_file(&file)
+}
+
+/// Hides the offer of the newest launcher ("launcher"), Leonida build ("leonida") or both
+/// ("both") until a newer one comes out.
+#[tauri::command(async)]
 fn update_later(state: State<'_, Shared>, what: String) -> Result<View, String> {
     let mut launcher = lock(&state);
-    match what.as_str() {
-        "launcher" => {
-            let offer = update::launcher_offer(&launcher.updates.saved.launcher, update::VERSION);
-            launcher.settings.later_launcher = offer.map(|o| o.version).unwrap_or_default();
-        }
-        "leonida" => {
-            let offer = update::build_offer(&launcher.updates.saved.leonida);
-            launcher.settings.later_build = offer.map_or(0, |o| o.number);
-        }
+    let (launcher_too, build_too) = match what.as_str() {
+        "launcher" => (true, false),
+        "leonida" => (false, true),
+        "both" => (true, true),
         _ => return Err(format!("There's no update called {what}.")),
+    };
+    if launcher_too {
+        let offer = update::launcher_offer(&launcher.updates.saved.launcher, update::VERSION);
+        launcher.settings.later_launcher = offer.map(|o| o.version).unwrap_or_default();
+    }
+    if build_too {
+        let offer = update::build_offer(&launcher.updates.saved.leonida);
+        launcher.settings.later_build = offer.map_or(0, |o| o.number);
     }
     launcher.save()?;
     Ok(launcher.view())
@@ -820,53 +939,93 @@ async fn install_build(
     if trial::running(&trials) {
         return Err("A test run is going. Finish it in Test a setting first.".into());
     }
-    let (offer, before) = {
+    let offer = {
+        let launcher = lock(&state);
+        if !launcher.updates.busy.is_empty() {
+            return Err("An update is downloading already.".into());
+        }
+        update::build_offer(&launcher.updates.saved.leonida).ok_or(
+            "There's no ready-made build to download right now. Check for updates under About.",
+        )?
+    };
+    let problem =
+        update::cannot_check(&offer.zip, offer.checksum.as_ref()).or_else(update::cannot_unpack);
+    if let Some(problem) = problem {
+        let _ = open_url(&update::page_or_list(&offer.page, update::LEONIDA));
+        return Err(problem.into());
+    }
+    {
         let mut launcher = lock(&state);
         if !launcher.updates.busy.is_empty() {
             return Err("An update is downloading already.".into());
         }
-        let offer = update::build_offer(&launcher.updates.saved.leonida).ok_or(
-            "There's no ready-made build to download right now. Check for updates under About.",
-        )?;
         launcher.updates.busy = "leonida";
-        let before = if launcher.has_exe() {
-            launcher.exe()
-        } else {
-            PathBuf::from(&launcher.settings.previous_leonida)
-        };
-        (offer, before)
-    };
+    }
     let number = offer.number;
-    let installed = spawn_blocking(move || {
+    let installed = match spawn_blocking(move || {
         if leonida::running() {
             return Err("Leonida is running. Close the game, then update.".to_string());
         }
-        let exe = update::install_build(&offer)?;
-        update::tidy_builds(&[&exe, &before]);
-        Ok(exe)
+        update::install_build(&offer)
+    })
+    .await
+    {
+        Ok(installed) => installed,
+        Err(error) => Err(stopped(error)),
+    };
+    // While `busy` holds, nothing else changes leonida.exe or starts the game, so the builds kept
+    // are the ones in use now.
+    let keep = {
+        let mut launcher = lock(&state);
+        let used = installed.and_then(|exe| {
+            if launcher.has_exe() && launcher.exe() != exe {
+                launcher.settings.previous_leonida = launcher.settings.leonida_exe.clone();
+            }
+            launcher.updates.have = update::Have::Build(number);
+            launcher.updates.have_of = Some(update::stamp(&exe));
+            launcher.settings.warm_pending = exe.display().to_string();
+            launcher.set_leonida(&exe)?;
+            Ok(exe)
+        });
+        match used {
+            Ok(exe) => [exe, PathBuf::from(&launcher.settings.previous_leonida)],
+            Err(error) => {
+                launcher.updates.busy = "";
+                return Err(error);
+            }
+        }
+    };
+    let _ = spawn_blocking(move || {
+        // Deleting a build the game runs from would leave half of it behind.
+        if !leonida::running() {
+            update::tidy_builds(&[&keep[0], &keep[1]]);
+        }
     })
     .await;
     let mut launcher = lock(&state);
     launcher.updates.busy = "";
-    let exe = installed.map_err(stopped)??;
-    if launcher.has_exe() && launcher.exe() != exe {
-        launcher.settings.previous_leonida = launcher.settings.leonida_exe.clone();
-    }
-    launcher.updates.have = update::Have::Build(number);
-    launcher.updates.have_of = Some(update::stamp(&exe));
-    launcher.updates.warm = true;
-    launcher.set_leonida(&exe)?;
     Ok(launcher.view())
 }
 
 /// Goes back to the leonida.exe used before the last ready-made build, and keeps that one for
 /// going forward again.
-#[tauri::command]
+#[tauri::command(async)]
 fn use_previous(state: State<'_, Shared>) -> Result<View, String> {
     let mut launcher = lock(&state);
+    launcher.not_installing()?;
     let previous = PathBuf::from(&launcher.settings.previous_leonida);
     if launcher.settings.previous_leonida.is_empty() || !previous.is_file() {
         return Err("The previous leonida.exe isn't there any more.".into());
+    }
+    // Leaving the newest build hides its offer: the player went back for a reason.
+    let exe = launcher.exe();
+    let newest = update::build_offer(&launcher.updates.saved.leonida).map(|offer| offer.number);
+    if let update::Have::Build(have) = launcher.updates.have
+        && launcher.has_exe()
+        && launcher.updates.knows(&exe)
+        && newest == Some(have)
+    {
+        launcher.settings.later_build = have;
     }
     launcher.settings.previous_leonida = launcher.settings.leonida_exe.clone();
     launcher.set_leonida(&previous)?;
@@ -896,14 +1055,23 @@ async fn update_checkout(
             );
         }
         update::is_checkout(&checkout)?;
+        let branch = match update::branch(&checkout) {
+            Some(name) if name == "main" => "It is on the main branch.".to_string(),
+            Some(name) => format!(
+                "It is on the branch {name}, not main: git pull gets the newest code of {name}, \
+                 which may not be the newest Leonida Legacy."
+            ),
+            None => "It isn't on a branch, so git pull will stop and change nothing.".to_string(),
+        };
         let answer = rfd::MessageDialog::new()
             .set_parent(&window)
             .set_level(rfd::MessageLevel::Info)
             .set_title("Leonida Launcher")
             .set_description(format!(
-                "Update your own build in {}?\n\nA window opens that gets the newest code with \
-                 git pull and builds leonida.exe with cargo build --release -p leonida, which \
-                 takes a few minutes. If you edited files there, it stops and changes nothing.",
+                "Update your own build in {}?\n\n{branch}\n\nA window opens that gets the newest \
+                 code with git pull and builds leonida.exe with cargo build --release -p \
+                 leonida, which takes a few minutes. If you edited files there, it stops and \
+                 changes nothing.",
                 checkout.display()
             ))
             .set_buttons(rfd::MessageButtons::YesNo)
@@ -920,7 +1088,7 @@ async fn update_checkout(
 
 /// Opens the release page of the newest launcher ("launcher") or Leonida build ("leonida").
 /// Only this project's pages, never a URL from the window.
-#[tauri::command]
+#[tauri::command(async)]
 fn open_release(state: State<'_, Shared>, which: String) -> Result<(), String> {
     let url = {
         let launcher = lock(&state);
@@ -936,11 +1104,7 @@ fn open_release(state: State<'_, Shared>, which: String) -> Result<(), String> {
         };
         update::page_or_list(page, repository)
     };
-    Command::new("explorer.exe")
-        .arg(&url)
-        .spawn()
-        .map(drop)
-        .map_err(|error| format!("Couldn't open the browser ({error}). The page is {url}"))
+    open_url(&url)
 }
 
 #[cfg(test)]

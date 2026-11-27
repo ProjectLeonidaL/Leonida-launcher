@@ -7,14 +7,17 @@
 use std::cmp::Ordering;
 use std::ffi::{OsStr, OsString};
 use std::io::Read;
+use std::os::windows::fs::MetadataExt;
 use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::Once;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
-use std::{env, fs, thread};
+use std::{env, fs, io, thread};
 
 use serde::{Deserialize, Serialize};
 
+use crate::pc::windows_tool;
 use crate::remote::{self, Miss};
 use crate::settings::Settings;
 
@@ -59,9 +62,18 @@ pub fn compare(a: &[u64], b: &[u64]) -> Ordering {
 }
 
 /// Whether version `theirs` is newer than `ours`. A tag that isn't a plain version never is.
+/// `ours` may carry a pre-release suffix ("0.3.0-rc1"): the release 0.3.0 is newer than that.
 pub fn is_newer(theirs: &str, ours: &str) -> bool {
-    match (version(theirs), version(ours)) {
-        (Some(theirs), Some(ours)) => compare(&theirs, &ours) == Ordering::Greater,
+    let ours = ours.trim().split('+').next().unwrap_or_default();
+    let (core, pre) = ours
+        .split_once('-')
+        .map_or((ours, false), |(core, _)| (core, true));
+    match (version(theirs), version(core)) {
+        (Some(theirs), Some(ours)) => match compare(&theirs, &ours) {
+            Ordering::Greater => true,
+            Ordering::Equal => pre,
+            Ordering::Less => false,
+        },
         _ => false,
     }
 }
@@ -196,6 +208,8 @@ pub struct BuildOffer {
     pub number: u64,
     pub page: String,
     pub zip: Asset,
+    /// leonida-windows-x64.zip.sha256, for when the API gives no digest.
+    pub checksum: Option<Asset>,
 }
 
 pub fn build_offer(known: &Known) -> Option<BuildOffer> {
@@ -206,8 +220,28 @@ pub fn build_offer(known: &Known) -> Option<BuildOffer> {
         number: build_number(&release.tag)?,
         page: release.page.clone(),
         zip: release.asset(LEONIDA_ZIP)?.clone(),
+        checksum: release.asset(&format!("{LEONIDA_ZIP}.sha256")).cloned(),
     })
 }
+
+/// Why the launcher can't install `file` itself, said before anything is downloaded: there's no
+/// SHA-256 to check it with. The player gets the release page instead.
+pub fn cannot_check(file: &Asset, checksum: Option<&Asset>) -> Option<&'static str> {
+    (file.sha256.is_empty() && checksum.is_none()).then_some(NO_CHECK)
+}
+
+const NO_CHECK: &str = "This release has no way to check that the download is the real file from \
+                        the project, so the launcher won't install it. The release page is open \
+                        in your browser instead.";
+
+/// Why a build can't be unpacked here: Windows' tar.exe came with Windows 10 version 1803.
+pub fn cannot_unpack() -> Option<&'static str> {
+    (!windows_tool("tar.exe").is_file()).then_some(NO_TAR)
+}
+
+const NO_TAR: &str = "Unpacking a build needs Windows' tar.exe, which comes with Windows 10 version \
+                      1803 and newer. Update Windows, or get the build from the release page, now \
+                      open in your browser.";
 
 /// The SHA-256 in a .sha256 file ("<hex>  name", or the hex alone), in certutil's output (with
 /// spaces between the bytes on older Windows) or after the API's "sha256:". Lowercase.
@@ -289,6 +323,8 @@ pub enum Game {
     /// A build from before build numbers.
     Old(u64),
     Current,
+    /// A higher number than the newest release, as after the release numbers started again.
+    Ahead(u64),
     NoReleases,
     Unknown,
 }
@@ -299,6 +335,7 @@ pub fn game_state(have: Have, newest: Newest) -> Game {
         (_, Newest::NoneYet) => Game::NoReleases,
         (Have::Missing, Newest::Build(n)) => Game::Download(n),
         (Have::Build(have), Newest::Build(n)) if have < n => Game::Behind { have, newest: n },
+        (Have::Build(have), Newest::Build(n)) if have > n => Game::Ahead(n),
         (Have::Build(_), Newest::Build(_)) => Game::Current,
         (Have::Local, Newest::Build(n)) => Game::Own(n),
         (Have::NoNumber, Newest::Build(n)) => Game::Old(n),
@@ -392,14 +429,20 @@ pub fn page_or_list(page: &str, repository: &str) -> String {
     }
 }
 
-/// `url` with curl.exe and the arguments in `extra`: the body (empty with --output), or why not.
-fn curl(url: &str, extra: &[&OsStr], seconds: u64) -> Result<String, Miss> {
+/// `url` with curl.exe and the arguments in `extra`, run in `dir` when given: the body (empty
+/// with --output), or why not.
+fn curl(url: &str, extra: &[&OsStr], seconds: u64, dir: Option<&Path>) -> Result<String, Miss> {
     let local = url.starts_with("file:");
     let agent = format!("leonida-launcher/{VERSION}");
     let run = |best_effort: bool| {
-        let mut command = Command::new("curl.exe");
+        let mut command = Command::new(windows_tool("curl.exe"));
+        if let Some(dir) = dir {
+            command.current_dir(dir);
+        }
+        // --disable, which must come first, keeps a .curlrc from adding headers, a proxy or
+        // --insecure.
         command
-            .args(["--silent", "--location", "--max-time"])
+            .args(["--disable", "--silent", "--location", "--max-time"])
             .arg(seconds.to_string())
             .args(["--user-agent", &agent]);
         if !local {
@@ -438,7 +481,7 @@ fn fetch(repository: &str) -> Result<Known, Miss> {
         OsStr::new("--header"),
         OsStr::new("Accept: application/vnd.github+json"),
     ];
-    known(curl(&feed(repository), &accept, 15))
+    known(curl(&feed(repository), &accept, 15, None))
 }
 
 /// Asks GitHub for both newest releases side by side, keeping the last answer for one that
@@ -449,21 +492,32 @@ pub fn check(mut saved: Saved) -> (Saved, Option<Miss>) {
         let leonida = fetch(LEONIDA);
         (launcher.join().unwrap_or(Err(Miss::Other(-1))), leonida)
     });
-    let mut miss = None;
+    let mut misses = Vec::new();
     match launcher {
         Ok(known) => saved.launcher = known,
-        Err(error) => miss = Some(error),
+        Err(error) => misses.push(error),
     }
     match leonida {
         Ok(known) => saved.leonida = known,
-        Err(error) => miss = miss.or(Some(error)),
+        Err(error) => misses.push(error),
     }
-    saved.checked = now();
-    if miss.is_some() {
-        saved.checked = saved.checked.saturating_sub(RETRY_SOONER);
-    }
+    saved.checked = retry_from(now(), &misses);
     saved.save();
-    (saved, miss)
+    (saved, misses.first().copied())
+}
+
+/// When the check counts as done: now, or earlier after a check that didn't get through, so the
+/// next comes sooner. Not after a rate limit: GitHub allows 60 questions an hour from one address,
+/// which players behind one shared address use up together.
+fn retry_from(now: u64, misses: &[Miss]) -> u64 {
+    let limited = misses
+        .iter()
+        .any(|miss| matches!(miss, Miss::Http(403 | 429)));
+    if misses.is_empty() || limited {
+        now
+    } else {
+        now.saturating_sub(RETRY_SOONER)
+    }
 }
 
 /// Why a check or a download didn't work, in one sentence.
@@ -493,9 +547,14 @@ pub fn check_note(miss: Miss) -> String {
     )
 }
 
+/// Downloads `url` to `to`. curl runs in its folder and gets only the file name, so a folder name
+/// outside the ANSI code page doesn't matter.
 fn download(url: &str, to: &Path, seconds: u64) -> Result<(), String> {
     let _ = fs::remove_file(to);
-    let result = curl(url, &[OsStr::new("--output"), to.as_os_str()], seconds);
+    let (Some(dir), Some(name)) = (to.parent(), to.file_name()) else {
+        return Err(format!("{} isn't a file name.", to.display()));
+    };
+    let result = curl(url, &[OsStr::new("--output"), name], seconds, Some(dir));
     match result {
         Ok(_) if to.is_file() => Ok(()),
         Ok(_) => Err("The download came back empty. Try again later.".into()),
@@ -510,7 +569,7 @@ fn download(url: &str, to: &Path, seconds: u64) -> Result<(), String> {
 }
 
 fn sha256_of(file: &Path) -> Result<String, String> {
-    let output = Command::new("certutil.exe")
+    let output = Command::new(windows_tool("certutil.exe"))
         .arg("-hashfile")
         .arg(file)
         .arg("SHA256")
@@ -541,8 +600,8 @@ fn verify(file: &Path, size: u64, sha256: &str) -> Result<(), String> {
     verify_size(file, size)?;
     if !sha256_of(file)?.eq_ignore_ascii_case(sha256) {
         return Err(
-            "The download doesn't match its checksum, so it wasn't used. Try again \
-                    later; if it happens again, tell the project on GitHub."
+            "The download came out different from the release (it may be damaged), so it \
+             wasn't used. Try again; if it happens again, tell the project on GitHub."
                 .into(),
         );
     }
@@ -564,55 +623,64 @@ fn can_write(file: &Path) -> bool {
         .is_ok()
 }
 
-fn expected_sha256(offer: &LauncherOffer) -> Result<String, String> {
-    if !offer.exe.sha256.is_empty() {
-        return Ok(offer.exe.sha256.clone());
+/// The SHA-256 the release gives for `file`: the API's digest, otherwise the one in its .sha256
+/// file. Without either, nothing is installed.
+fn expected_sha256(
+    file: &Asset,
+    checksum: Option<&Asset>,
+    repository: &str,
+) -> Result<String, String> {
+    if !file.sha256.is_empty() {
+        return Ok(file.sha256.clone());
     }
-    let none = "This release has no checksum, so the launcher won't install it. Get it from the \
-                release page instead.";
-    let Some(file) = offer
-        .checksum
-        .as_ref()
-        .filter(|f| allowed(&f.url, LAUNCHER))
-    else {
-        return Err(none.into());
+    let Some(sums) = checksum.filter(|sums| allowed(&sums.url, repository)) else {
+        return Err(NO_CHECK.into());
     };
-    let text = curl(&file.url, &[], 30).map_err(|miss| {
+    let text = curl(&sums.url, &[], 30, None).map_err(|miss| {
         format!(
-            "The checksum didn't download. {} Try again later.",
+            "The file that checks the download didn't come. {} Try again later.",
             reason(miss)
         )
     })?;
-    find_sha256(&text).ok_or_else(|| none.into())
+    find_sha256(&text).ok_or_else(|| {
+        "The file that checks the download couldn't be read, so nothing was installed. Try \
+         again later; if it happens again, tell the project on GitHub."
+            .into()
+    })
 }
+
+const NO_LOCALAPPDATA: &str = "Windows didn't say where %LOCALAPPDATA% is.";
 
 pub enum Fetched {
     /// The new launcher is in place of this .exe, which is now `<name>.old`.
     Swapped(PathBuf),
-    /// This folder can't be written to: the checked download is here for the player.
+    /// The launcher couldn't replace itself: the checked download is here for the player.
     ByHand(PathBuf),
 }
 
+/// Where a checked new launcher waits when it can't replace the running one.
+fn by_hand_dir() -> Option<PathBuf> {
+    data_dir().map(|dir| dir.join("update"))
+}
+
 /// Downloads the new launcher beside this one, checks it and puts it in place of this .exe.
-/// When this folder can't be written to, the checked download goes to %LOCALAPPDATA% instead.
-/// Any failure leaves the running .exe where it was.
+/// When this folder can't be written to, or Windows doesn't let the .exe be replaced, the checked
+/// download goes to %LOCALAPPDATA% instead. Any failure leaves the running .exe where it was.
 pub fn fetch_launcher(offer: &LauncherOffer) -> Result<Fetched, String> {
     if !allowed(&offer.exe.url, LAUNCHER) {
         return Err(NOT_OURS.into());
     }
-    let sha256 = expected_sha256(offer)?;
+    let sha256 = expected_sha256(&offer.exe, offer.checksum.as_ref(), LAUNCHER)?;
     let exe = env::current_exe()
         .map_err(|error| format!("Windows didn't say where the launcher is ({error})."))?;
     let beside = with_suffix(&exe, ".new");
-    let (target, by_hand) = if can_write(&beside) {
-        (beside, false)
+    let target = if can_write(&beside) {
+        beside.clone()
     } else {
-        let dir = data_dir()
-            .ok_or("Windows didn't say where %LOCALAPPDATA% is.")?
-            .join("update");
+        let dir = by_hand_dir().ok_or(NO_LOCALAPPDATA)?;
         fs::create_dir_all(&dir)
             .map_err(|error| format!("Couldn't make {} ({error}).", dir.display()))?;
-        (dir.join(LAUNCHER_EXE), true)
+        dir.join(LAUNCHER_EXE)
     };
     download(&offer.exe.url, &target, 600)?;
     let checked = verify(&target, offer.exe.size, &sha256).and_then(|()| is_program(&target));
@@ -620,11 +688,10 @@ pub fn fetch_launcher(offer: &LauncherOffer) -> Result<Fetched, String> {
         let _ = fs::remove_file(&target);
         return Err(error);
     }
-    if by_hand {
-        return Ok(Fetched::ByHand(target));
+    if target != beside {
+        return hand_over(&target, &offer.version).map(Fetched::ByHand);
     }
-    swap(&exe, &target)?;
-    Ok(Fetched::Swapped(exe))
+    swap(&exe, &target, &offer.version)
 }
 
 const NOT_OURS: &str = "The release points somewhere other than this project's GitHub page, so \
@@ -639,46 +706,212 @@ fn is_program(file: &Path) -> Result<(), String> {
     }
 }
 
-fn swap(exe: &Path, new: &Path) -> Result<(), String> {
+/// Renames `from` to `to`, trying again for 5 s: antivirus often holds a file it has just seen
+/// written open for a moment.
+fn rename_retry(from: &Path, to: &Path) -> io::Result<()> {
+    let mut result = fs::rename(from, to);
+    for _ in 0..20 {
+        if result.is_ok() {
+            break;
+        }
+        thread::sleep(Duration::from_millis(250));
+        result = fs::rename(from, to);
+    }
+    result
+}
+
+/// Moves a checked new launcher to the update folder for the player to copy by hand, with its
+/// version beside it, so that a later start knows when it is no longer needed.
+fn hand_over(new: &Path, version: &str) -> Result<PathBuf, String> {
+    let dir = by_hand_dir().ok_or(NO_LOCALAPPDATA)?;
+    fs::create_dir_all(&dir)
+        .map_err(|error| format!("Couldn't make {} ({error}).", dir.display()))?;
+    let target = dir.join(LAUNCHER_EXE);
+    if new != target {
+        let _ = fs::remove_file(&target);
+        // A rename can't cross drives; a copy can.
+        if fs::rename(new, &target).is_err() {
+            fs::copy(new, &target)
+                .map_err(|error| format!("Couldn't keep the new launcher ({error})."))?;
+            let _ = fs::remove_file(new);
+        }
+    }
+    let _ = fs::write(dir.join("version.txt"), version);
+    Ok(target)
+}
+
+/// The checked new launcher waiting in the update folder for the player to copy, while it is
+/// newer than this one.
+pub fn waiting_by_hand() -> Option<PathBuf> {
+    let dir = by_hand_dir()?;
+    let version = fs::read_to_string(dir.join("version.txt")).ok()?;
+    let exe = dir.join(LAUNCHER_EXE);
+    (is_newer(&version, VERSION) && exe.is_file()).then_some(exe)
+}
+
+/// Puts the checked `new` in place of the running `exe`, which becomes `<exe>.old`. When Windows
+/// doesn't allow that, the old launcher stays where it was and the download goes to the update
+/// folder for the player.
+fn swap(exe: &Path, new: &Path, version: &str) -> Result<Fetched, String> {
     let old = with_suffix(exe, ".old");
     let _ = fs::remove_file(&old);
-    if let Err(error) = fs::rename(exe, &old) {
-        let _ = fs::remove_file(new);
+    if rename_retry(exe, &old).is_err() {
+        return hand_over(new, version).map(Fetched::ByHand);
+    }
+    if rename_retry(new, exe).is_ok() {
+        return Ok(Fetched::Swapped(exe.to_path_buf()));
+    }
+    if rename_retry(&old, exe).is_err() {
         return Err(format!(
-            "Windows didn't let the launcher set its own .exe aside ({error}). Nothing changed."
+            "Windows didn't let the new launcher take the old one's place, nor put the old one \
+             back. {}",
+            rename_back(exe)
         ));
     }
-    if let Err(error) = fs::rename(new, exe) {
-        let _ = fs::rename(&old, exe);
-        let _ = fs::remove_file(new);
-        return Err(format!(
-            "Windows didn't let the new launcher take the old one's place ({error}). Nothing \
-             changed."
-        ));
+    hand_over(new, version).map(Fetched::ByHand)
+}
+
+/// What the player does to get the old launcher back by hand.
+fn rename_back(exe: &Path) -> String {
+    let name = exe.file_name().unwrap_or_default().to_string_lossy();
+    format!(
+        "To use the old launcher, delete {name} if it is there, then rename {} to {name}.",
+        with_suffix(exe, ".old").display()
+    )
+}
+
+/// Puts `<exe>.old` back in place of the new launcher, which becomes `<exe>.new` (a running .exe
+/// can be renamed, not deleted) for the next start to delete. True when the old one is back.
+fn undo_swap(exe: &Path) -> bool {
+    let old = with_suffix(exe, ".old");
+    if !old.is_file() {
+        return false;
     }
+    let aside = with_suffix(exe, ".new");
+    let _ = fs::remove_file(&aside);
+    if exe.exists() && rename_retry(exe, &aside).is_err() {
+        return false;
+    }
+    if rename_retry(&old, exe).is_ok() {
+        return true;
+    }
+    let _ = rename_retry(&aside, exe);
+    false
+}
+
+/// Starts the new launcher that took this one's place and waits, up to 30 s, until its window
+/// has loaded (it leaves `<exe>.started`). When it ends before that, the old launcher is put
+/// back. Ok means this launcher may close.
+pub fn start_new(exe: &Path) -> Result<(), String> {
+    let signal = with_suffix(exe, ".started");
+    let _ = fs::remove_file(&signal);
+    let mut child = match Command::new(exe).spawn() {
+        Ok(child) => child,
+        Err(error) => {
+            return Err(put_back(
+                exe,
+                &format!("The new launcher didn't start ({error})"),
+            ));
+        }
+    };
+    let since = Instant::now();
+    while since.elapsed() < Duration::from_secs(30) {
+        if signal.exists() {
+            return Ok(());
+        }
+        if let Ok(Some(_)) = child.try_wait() {
+            // Its window opened and was closed, or it put this launcher back itself.
+            if signal.exists() || !with_suffix(exe, ".old").exists() {
+                return Ok(());
+            }
+            return Err(put_back(
+                exe,
+                "The new launcher closed before its window opened",
+            ));
+        }
+        thread::sleep(Duration::from_millis(200));
+    }
+    // Still starting. If its window can't open, it offers to go back to this one itself.
     Ok(())
 }
 
-/// Puts the old launcher back after the new one didn't start.
-pub fn undo_swap(exe: &Path) {
-    let _ = fs::remove_file(exe);
-    let _ = fs::rename(with_suffix(exe, ".old"), exe);
+/// For a new launcher that isn't running (it never started or has ended).
+fn put_back(exe: &Path, what: &str) -> String {
+    if undo_swap(exe) {
+        let _ = fs::remove_file(with_suffix(exe, ".new"));
+        format!(
+            "{what}, so this launcher stays. Try again later; if it happens again, tell the \
+             project on GitHub."
+        )
+    } else {
+        format!(
+            "{what}, and Windows didn't let this launcher take its place back. {}",
+            rename_back(exe)
+        )
+    }
 }
 
-/// Deletes what an update left beside this .exe: the old one once its process has ended, and a
-/// download that didn't finish. In the background, for up to 30 s.
-pub fn tidy() {
-    let Ok(exe) = env::current_exe() else { return };
-    thread::spawn(move || {
-        let _ = fs::remove_file(with_suffix(&exe, ".new"));
-        let old = with_suffix(&exe, ".old");
-        for _ in 0..60 {
-            if !old.exists() || fs::remove_file(&old).is_ok() {
-                break;
+/// Whether this launcher replaced an older one that is still beside it.
+pub fn can_go_back() -> bool {
+    env::current_exe().is_ok_and(|exe| with_suffix(&exe, ".old").is_file())
+}
+
+/// For a new launcher whose window couldn't open: puts the previous one back and starts it.
+pub fn go_back() -> Result<(), String> {
+    let exe = env::current_exe()
+        .map_err(|error| format!("Windows didn't say where the launcher is ({error})."))?;
+    if !undo_swap(&exe) {
+        return Err(format!(
+            "Windows didn't let the previous launcher back in its place. {}",
+            rename_back(&exe)
+        ));
+    }
+    Command::new(&exe).spawn().map(drop).map_err(|error| {
+        format!(
+            "The previous launcher is back as {}, but it didn't start ({error}). Double-click \
+             it.",
+            exe.display()
+        )
+    })
+}
+
+/// Called once the window has loaded. After an update, it tells the launcher that started this
+/// one that it may close, and only then is the old .exe deleted: until here, a new launcher that
+/// can't open its window can still go back to it.
+pub fn started() {
+    static ONCE: Once = Once::new();
+    ONCE.call_once(|| {
+        thread::spawn(|| {
+            let Ok(exe) = env::current_exe() else { return };
+            if with_suffix(&exe, ".old").exists() {
+                let _ = fs::write(with_suffix(&exe, ".started"), b"");
             }
-            thread::sleep(Duration::from_millis(500));
-        }
+            tidy(&exe);
+        });
     });
+}
+
+/// Deletes what an update left: a download beside `exe` that didn't finish, the old .exe once
+/// its process has ended (trying for up to 30 s) and the copy-by-hand download once this
+/// launcher is at least that version.
+fn tidy(exe: &Path) {
+    let _ = fs::remove_file(with_suffix(exe, ".new"));
+    if let Some(dir) = by_hand_dir()
+        && waiting_by_hand().is_none()
+    {
+        let _ = fs::remove_file(dir.join(LAUNCHER_EXE));
+        let _ = fs::remove_file(dir.join("version.txt"));
+    }
+    let old = with_suffix(exe, ".old");
+    for _ in 0..60 {
+        if !old.exists() || fs::remove_file(&old).is_ok() {
+            break;
+        }
+        thread::sleep(Duration::from_millis(500));
+    }
+    if !old.exists() {
+        let _ = fs::remove_file(with_suffix(exe, ".started"));
+    }
 }
 
 /// Runs `leonida.exe version` without a window, for up to 10 s. It prints three lines and exits;
@@ -745,24 +978,56 @@ fn installed_build(exe: &Path) -> Option<u64> {
         .find_map(build_number)
 }
 
-/// leonida.exe in an unpacked build: in its leonida folder, as the release zip has it, or at the
-/// top.
+/// leonida.exe in an unpacked build, in its leonida folder as the release zip has it.
 fn exe_in(dir: &Path) -> Option<PathBuf> {
-    [
-        dir.join("leonida").join("leonida.exe"),
-        dir.join("leonida.exe"),
-    ]
-    .into_iter()
-    .find(|exe| exe.is_file())
+    Some(dir.join("leonida").join("leonida.exe")).filter(|exe| exe.is_file())
 }
 
-/// Downloads build `offer`, unpacks it to builds\build-N and returns its leonida.exe, which
-/// said it is build N. A build there already is used as it is.
+/// Whether a name `tar -tf` lists stays inside the zip's leonida folder: not absolute, no drive
+/// or other `:`, no `..`.
+fn safe_entry(name: &str) -> bool {
+    if name.starts_with(['/', '\\']) || name.contains(':') {
+        return false;
+    }
+    let mut parts = name.split(['/', '\\']);
+    parts.next() == Some("leonida") && parts.all(|part| part != "..")
+}
+
+/// Whether anything under `dir` is a link (a symbolic link or junction) or can't be looked at.
+fn has_link(dir: &Path) -> bool {
+    const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
+    let Ok(mut entries) = fs::read_dir(dir) else {
+        return true;
+    };
+    entries.any(|entry| {
+        let Ok(entry) = entry else { return true };
+        match entry.path().symlink_metadata() {
+            Ok(meta) if meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 => true,
+            Ok(meta) if meta.is_dir() => has_link(&entry.path()),
+            Ok(_) => false,
+            Err(_) => true,
+        }
+    })
+}
+
+/// `tar.exe` with `args`, in the builds folder so it gets only plain names.
+fn tar(dir: &Path, args: &[&str]) -> io::Result<std::process::Output> {
+    Command::new(windows_tool("tar.exe"))
+        .args(args)
+        .current_dir(dir)
+        .stdin(Stdio::null())
+        .creation_flags(CREATE_NO_WINDOW)
+        .output()
+}
+
+/// Downloads build `offer`, checks its SHA-256 and what it holds, unpacks it to builds\build-N
+/// and returns its leonida.exe, which said it is build N. A build there already is used as it is.
 pub fn install_build(offer: &BuildOffer) -> Result<PathBuf, String> {
     if !allowed(&offer.zip.url, LEONIDA) {
         return Err(NOT_OURS.into());
     }
-    let dir = builds_dir().ok_or("Windows didn't say where %LOCALAPPDATA% is.")?;
+    let sha256 = expected_sha256(&offer.zip, offer.checksum.as_ref(), LEONIDA)?;
+    let dir = builds_dir().ok_or(NO_LOCALAPPDATA)?;
     fs::create_dir_all(&dir)
         .map_err(|error| format!("Couldn't make {} ({error}).", dir.display()))?;
     let n = offer.number;
@@ -772,39 +1037,57 @@ pub fn install_build(offer: &BuildOffer) -> Result<PathBuf, String> {
     {
         return Ok(exe);
     }
-    let zip = dir.join(format!("build-{n}.zip"));
+    let zip_name = format!("build-{n}.zip");
+    let zip = dir.join(&zip_name);
     download(&offer.zip.url, &zip, 600)?;
-    let checked = if offer.zip.sha256.is_empty() {
-        verify_size(&zip, offer.zip.size)
-    } else {
-        verify(&zip, offer.zip.size, &offer.zip.sha256)
-    };
-    if let Err(error) = checked {
+    if let Err(error) = verify(&zip, offer.zip.size, &sha256) {
         let _ = fs::remove_file(&zip);
         return Err(error);
     }
-    let part = dir.join(format!("build-{n}.part"));
+    let listed = match tar(&dir, &["-tf", &zip_name]) {
+        Ok(out) if out.status.success() => {
+            let text = String::from_utf8_lossy(&out.stdout).into_owned();
+            let names: Vec<&str> = text.lines().map(str::trim_end).collect();
+            if names.iter().all(|name| name.is_empty() || safe_entry(name)) {
+                Ok(())
+            } else {
+                Err(
+                    "The download holds files outside its leonida folder, so it wasn't used. \
+                     Tell the project on GitHub."
+                        .to_string(),
+                )
+            }
+        }
+        Ok(_) => Err("The download couldn't be read as a zip. Try again.".to_string()),
+        Err(error) => Err(format!(
+            "Windows' tar.exe couldn't read the download ({error})."
+        )),
+    };
+    if let Err(error) = listed {
+        let _ = fs::remove_file(&zip);
+        return Err(error);
+    }
+    let part_name = format!("build-{n}.part");
+    let part = dir.join(&part_name);
     let _ = fs::remove_dir_all(&part);
-    let unpacked = fs::create_dir_all(&part).and_then(|()| {
-        Command::new("tar.exe")
-            .arg("-xf")
-            .arg(&zip)
-            .arg("-C")
-            .arg(&part)
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .creation_flags(CREATE_NO_WINDOW)
-            .status()
-    });
+    let unpacked =
+        fs::create_dir_all(&part).and_then(|()| tar(&dir, &["-xf", &zip_name, "-C", &part_name]));
     let _ = fs::remove_file(&zip);
     let failed = |text: String| {
         let _ = fs::remove_dir_all(&part);
         Err(text)
     };
     match unpacked {
-        Ok(status) if status.success() => {}
+        Ok(out) if out.status.success() => {}
         Ok(_) => return failed("The download couldn't be unpacked. Try again.".into()),
         Err(error) => return failed(format!("Windows' tar.exe couldn't unpack it ({error}).")),
+    }
+    if has_link(&part) {
+        return failed(
+            "The download holds a link to somewhere else on this PC, so it wasn't used. Tell \
+             the project on GitHub."
+                .into(),
+        );
     }
     let Some(exe) = exe_in(&part) else {
         return failed("There's no leonida.exe in the download.".into());
@@ -817,17 +1100,17 @@ pub fn install_build(offer: &BuildOffer) -> Result<PathBuf, String> {
     let Ok(relative) = exe.strip_prefix(&part).map(Path::to_path_buf) else {
         return failed("The build isn't where it was unpacked.".into());
     };
+    // The download can take minutes: the game may have been started from a build meanwhile.
+    if crate::leonida::running() {
+        return failed(
+            "Leonida was started while the build downloaded. Close the game, then \
+                       update again."
+                .into(),
+        );
+    }
     let _ = fs::remove_dir_all(&done);
     // Antivirus may still be reading the new files for a moment.
-    let mut moved = fs::rename(&part, &done);
-    for _ in 0..20 {
-        if moved.is_ok() {
-            break;
-        }
-        thread::sleep(Duration::from_millis(250));
-        moved = fs::rename(&part, &done);
-    }
-    match moved {
+    match rename_retry(&part, &done) {
         Ok(()) => Ok(done.join(relative)),
         Err(error) => failed(format!("Couldn't put the build in place ({error}).")),
     }
@@ -862,6 +1145,11 @@ foreach ($tool in 'git', 'cargo') {
     return
   }
 }
+$branch = git branch --show-current
+Write-Host "Branch: $branch"
+if ($branch -ne 'main') {
+  Write-Host "This checkout is on $branch, not main: git pull gets the newest code of $branch, which may not be the newest Leonida Legacy." -ForegroundColor Yellow
+}
 git update-index -q --refresh
 git diff-index --quiet HEAD --
 if ($LASTEXITCODE -ne 0) {
@@ -894,48 +1182,45 @@ pub fn is_checkout(folder: &Path) -> Result<(), String> {
     ))
 }
 
+/// The branch a checkout is on, read from its HEAD file (a worktree's too) without running git.
+pub fn branch(checkout: &Path) -> Option<String> {
+    let git = checkout.join(".git");
+    let dir = if git.is_dir() {
+        git
+    } else {
+        let text = fs::read_to_string(&git).ok()?;
+        checkout.join(text.trim().strip_prefix("gitdir:")?.trim())
+    };
+    let head = fs::read_to_string(dir.join("HEAD")).ok()?;
+    head.trim()
+        .strip_prefix("ref: refs/heads/")
+        .map(str::to_string)
+}
+
 /// Opens a PowerShell window in `checkout` that pulls the newest code (only as a fast-forward,
-/// and only when no tracked file was edited) and builds leonida.exe. The window stays open.
+/// and only when no tracked file was edited) and builds leonida.exe. The window stays open. The
+/// script runs from a file: antivirus watches for encoded command lines.
 pub fn update_checkout(checkout: &Path) -> Result<(), String> {
     is_checkout(checkout)?;
-    let script = script_argument(CHECKOUT_SCRIPT);
-    Command::new("powershell.exe")
-        .args([
-            "-NoLogo",
-            "-NoProfile",
-            "-NoExit",
-            "-ExecutionPolicy",
-            "Bypass",
-        ])
-        .args(["-EncodedCommand", &script])
+    let script = data_dir()
+        .ok_or(NO_LOCALAPPDATA)?
+        .join("update-checkout.ps1");
+    if let Some(dir) = script.parent() {
+        let _ = fs::create_dir_all(dir);
+    }
+    // With a byte order mark, Windows PowerShell 5.1 reads the file as UTF-8.
+    let text = format!("{BOM}{}", CHECKOUT_SCRIPT.replace('\n', "\r\n"));
+    fs::write(&script, text)
+        .map_err(|error| format!("Couldn't write {} ({error}).", script.display()))?;
+    Command::new(windows_tool(r"WindowsPowerShell\v1.0\powershell.exe"))
+        .args(["-NoLogo", "-NoProfile", "-NoExit"])
+        .args(["-ExecutionPolicy", "Bypass", "-File"])
+        .arg(&script)
         .current_dir(checkout)
         .creation_flags(CREATE_NEW_CONSOLE)
         .spawn()
         .map(drop)
         .map_err(|error| format!("Couldn't open PowerShell ({error})."))
-}
-
-/// A script for -EncodedCommand: UTF-16LE in base64, so nothing in it needs quoting.
-fn script_argument(script: &str) -> String {
-    let bytes: Vec<u8> = script.encode_utf16().flat_map(u16::to_le_bytes).collect();
-    base64(&bytes)
-}
-
-fn base64(bytes: &[u8]) -> String {
-    const LETTERS: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut text = String::with_capacity(bytes.len().div_ceil(3) * 4);
-    for chunk in bytes.chunks(3) {
-        let byte = |i: usize| u32::from(chunk.get(i).copied().unwrap_or(0));
-        let n = (byte(0) << 16) | (byte(1) << 8) | byte(2);
-        for i in 0..4 {
-            if i <= chunk.len() {
-                text.push(char::from(LETTERS[((n >> (18 - 6 * i)) & 63) as usize]));
-            } else {
-                text.push('=');
-            }
-        }
-    }
-    text
 }
 
 /// What the launcher knows about updates while it runs.
@@ -950,8 +1235,6 @@ pub struct Updates {
     pub checking: bool,
     /// "launcher" or "leonida" while that is being downloaded.
     pub busy: &'static str,
-    /// A new build is in use and its shaders aren't warmed up yet.
-    pub warm: bool,
 }
 
 impl Updates {
@@ -976,6 +1259,8 @@ impl Updates {
         let state = game_state(have, newest(&self.saved.leonida));
         let newest = build.as_ref().map_or(0, |offer| offer.number);
         let previous = Path::new(&settings.previous_leonida);
+        let has_previous = !settings.previous_leonida.is_empty() && previous.is_file();
+        let exe = Path::new(&settings.leonida_exe);
         UpdatesView {
             launcher: VERSION,
             launcher_later: answered_later(&launcher_new, &settings.later_launcher),
@@ -986,6 +1271,7 @@ impl Updates {
                 Game::Own(_) => "own",
                 Game::Old(_) => "old",
                 Game::Current => "current",
+                Game::Ahead(_) => "ahead",
                 Game::NoReleases => "none",
                 Game::Unknown => "unknown",
             },
@@ -1006,9 +1292,7 @@ impl Updates {
                 _ => 0,
             },
             game_later: newest > 0 && settings.later_build >= newest,
-            previous: if settings.previous_leonida.is_empty() || !previous.is_file() {
-                String::new()
-            } else {
+            previous: if has_previous {
                 installed_build(previous).map_or_else(
                     || {
                         let folder = crate::leonida::folder(previous);
@@ -1016,12 +1300,23 @@ impl Updates {
                     },
                     |n| format!("Build {n}"),
                 )
+            } else {
+                String::new()
             },
+            previous_build: if has_previous {
+                installed_build(previous).unwrap_or(0)
+            } else {
+                0
+            },
+            checkout: has_exe && is_checkout(&crate::leonida::folder(exe)).is_ok(),
             checked: self.saved.checked,
             note: self.miss.map(check_note).unwrap_or_default(),
             checking: self.checking,
             busy: self.busy,
-            warm: self.warm,
+            warm: has_exe && settings.warm_pending == settings.leonida_exe,
+            by_hand: waiting_by_hand().map_or_else(String::new, |file| file.display().to_string()),
+            launcher_exe: env::current_exe()
+                .map_or_else(|_| String::new(), |exe| exe.display().to_string()),
         }
     }
 }
@@ -1034,8 +1329,8 @@ pub struct UpdatesView {
     pub launcher_new: String,
     /// The player answered Later to that version.
     pub launcher_later: bool,
-    /// "download", "behind", "own", "old", "current", "none" (no ready-made builds yet) or
-    /// "unknown".
+    /// "download", "behind", "own", "old", "current", "ahead" (a higher number than the newest
+    /// release), "none" (no ready-made builds yet) or "unknown".
     pub game: &'static str,
     /// The newest ready-made build, or 0.
     pub newest: u64,
@@ -1046,12 +1341,21 @@ pub struct UpdatesView {
     pub game_later: bool,
     /// The leonida.exe to go back to, in words, or empty.
     pub previous: String,
+    /// Its build number, or 0 for the player's own build.
+    pub previous_build: u64,
+    /// Whether the leonida.exe in use was built in a git checkout, which can be updated.
+    pub checkout: bool,
     /// When GitHub was last asked, in seconds since 1970, or 0.
     pub checked: u64,
     pub note: String,
     pub checking: bool,
     pub busy: &'static str,
+    /// The build in use is new and its shaders aren't warmed up yet.
     pub warm: bool,
+    /// A checked new launcher waiting for the player to copy it by hand, or empty.
+    pub by_hand: String,
+    /// The running launcher's .exe, which that copy replaces.
+    pub launcher_exe: String,
 }
 
 #[cfg(test)]
@@ -1094,6 +1398,16 @@ mod tests {
         assert!(!is_newer("v0.1.9", "0.2.0"));
         assert!(!is_newer("nightly", "0.2.0"));
         assert!(!is_newer("0.3.0", ""), "nothing answered Later yet");
+        assert!(
+            is_newer("v0.3.0", "0.3.0-rc1"),
+            "the release after its candidate"
+        );
+        assert!(is_newer("v0.3.1", "0.3.0-rc1"));
+        assert!(!is_newer("v0.2.9", "0.3.0-rc1"));
+        assert!(
+            !is_newer("v0.3.0", "0.3.0+local"),
+            "build metadata isn't a pre-release"
+        );
     }
 
     #[test]
@@ -1207,7 +1521,11 @@ mod tests {
         };
         assert_eq!(game_state(Have::Build(118), n), behind);
         assert_eq!(game_state(Have::Build(120), n), Game::Current);
-        assert_eq!(game_state(Have::Build(121), n), Game::Current);
+        assert_eq!(
+            game_state(Have::Build(617), n),
+            Game::Ahead(120),
+            "release numbers started again"
+        );
         assert_eq!(game_state(Have::Local, n), Game::Own(120));
         assert_eq!(game_state(Have::NoNumber, n), Game::Old(120));
         assert_eq!(game_state(Have::Unknown, n), Game::Unknown);
@@ -1256,12 +1574,67 @@ mod tests {
     }
 
     #[test]
-    fn scripts_are_encoded_for_powershell() {
-        assert_eq!(base64(b"Man"), "TWFu");
-        assert_eq!(base64(b"Ma"), "TWE=");
-        assert_eq!(base64(b"M"), "TQ==");
-        assert_eq!(base64(b""), "");
-        assert_eq!(script_argument("dir"), "ZABpAHIA");
+    fn zip_entries_stay_in_the_leonida_folder() {
+        for good in [
+            "leonida/",
+            "leonida/leonida.exe",
+            "leonida/docs/./a.txt",
+            "leonida",
+        ] {
+            assert!(safe_entry(good), "{good}");
+        }
+        for bad in [
+            "/leonida/leonida.exe",
+            "\\leonida\\x",
+            "C:/leonida/x",
+            "leonida/../x.exe",
+            "leonida\\..\\x.exe",
+            "other/leonida.exe",
+            "leonida.exe",
+            "leonida/x:stream",
+        ] {
+            assert!(!safe_entry(bad), "{bad}");
+        }
+    }
+
+    #[test]
+    fn a_rate_limit_waits_the_full_hour() {
+        assert_eq!(retry_from(10_000, &[]), 10_000);
+        assert_eq!(
+            retry_from(10_000, &[Miss::NoConnection]),
+            10_000 - RETRY_SOONER
+        );
+        assert_eq!(retry_from(10_000, &[Miss::Http(403)]), 10_000);
+        assert_eq!(
+            retry_from(10_000, &[Miss::TimedOut, Miss::Http(429)]),
+            10_000
+        );
+    }
+
+    #[test]
+    fn the_branch_of_a_checkout_and_a_worktree() {
+        let root = env::temp_dir().join("leonida-launcher-branch-test");
+        let _ = fs::remove_dir_all(&root);
+        let checkout = root.join("main");
+        fs::create_dir_all(checkout.join(".git")).unwrap();
+        fs::write(checkout.join(".git").join("HEAD"), "ref: refs/heads/main\n").unwrap();
+        assert_eq!(branch(&checkout).as_deref(), Some("main"));
+        let tree = root.join("tree");
+        let gitdir = root
+            .join("main")
+            .join(".git")
+            .join("worktrees")
+            .join("tree");
+        fs::create_dir_all(&tree).unwrap();
+        fs::create_dir_all(&gitdir).unwrap();
+        fs::write(gitdir.join("HEAD"), "ref: refs/heads/feat/x\n").unwrap();
+        fs::write(tree.join(".git"), format!("gitdir: {}\n", gitdir.display())).unwrap();
+        assert_eq!(branch(&tree).as_deref(), Some("feat/x"));
+        assert!(is_checkout(&tree).is_ok());
+        fs::write(checkout.join(".git").join("HEAD"), "0123abc\n").unwrap();
+        assert_eq!(branch(&checkout), None, "detached");
+        assert!(is_checkout(&root).is_err());
+        fs::remove_dir_all(&root).unwrap();
     }
 
     #[test]
@@ -1278,6 +1651,10 @@ mod tests {
             note,
             check_note(Miss::Http(403)),
             CHECKOUT_SCRIPT.to_string(),
+            NO_CHECK.to_string(),
+            NOT_OURS.to_string(),
+            NO_LOCALAPPDATA.to_string(),
+            NO_TAR.to_string(),
         ] {
             assert!(!text.contains(LONG_DASH), "{text}");
         }
