@@ -8,7 +8,8 @@ the profiles and `LEONIDA_*` switches you want to test, without typing PowerShel
   pick the folder or the game's .exe yourself.
 - **leonida.exe:** found beside the launcher or in a `target\release` under Downloads, or picked.
 - **Play / Warm up shaders:** start `leonida.exe run --execute` or `translate --warm all` in a
-  new console window that stays open with the log.
+  new console window. It closes when the run ends well and stays open with the log after an
+  error.
 - **Picture and speed:** *Recommended* lets Leonida pick the profiles for your graphics card and
   sets nothing else. *My own choices* opens the profiles, the switches and extra `NAME=value`
   lines: ticked profiles go into `LEONIDA_PROFILE`, each switch has a drop-down where `default`
@@ -66,7 +67,10 @@ When both a new launcher and a new Leonida build are out, one row *2 UPDATES ARE
     ready-made builds* switches to them. When it was built in a git checkout, *Update my
     checkout* asks first (naming the branch), then opens a window that runs `git pull --ff-only`
     and `cargo build --release -p leonida` there. It stops and changes nothing if you edited
-    files, and warns when the checkout isn't on `main`.
+    files, and warns when the checkout isn't on `main`. The window closes by itself when it
+    worked and waits for Enter after a problem. Each check also runs `git fetch` in the checkout
+    (hidden, never asking for a password), and a row *N NEW COMMITS FOR YOUR CHECKOUT* shows up
+    when the branch it pulls from has newer code.
 
   Builds go to `%LOCALAPPDATA%\leonida-launcher\builds`; nothing is installed in Windows. The
   launcher installs a build only when the release gives its SHA-256 and the zip holds nothing

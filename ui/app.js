@@ -184,6 +184,10 @@ const launcherNews = () => !!(V && U().launcher_new && !U().launcher_later);
 const buildNews = () => !!(V && U().game === "behind" && !U().game_later && !installing());
 /** Both are out: one row and one pane hold them, so the Play list keeps its length. */
 const bothNews = () => launcherNews() && buildNews();
+/** New commits for the player's own checkout. They use the build row when no ready-made build is out. */
+const checkoutNews = () => !!(V && U().checkout && U().checkout_behind > 0 && !buildNews());
+const commits = (n) => (n === 1 ? "1 new commit" : `${n} new commits`);
+const onBranch = () => (U().checkout_branch ? ` on ${U().checkout_branch}` : "");
 const downloadLabel = () => `Download Leonida (build ${U().newest}, ${U().newest_size})`;
 
 /** The link to the leonida.exe used before, named by where it goes. */
@@ -218,7 +222,10 @@ function updateSummary() {
     ahead: `The newest published ready-made Leonida build is ${u.newest}, a lower number than yours.`,
     none: "No ready-made Leonida builds are published yet.",
   }[u.game] || "";
-  return `${launcher} ${game}`.trim();
+  const checkout = !u.checkout || u.checkout_behind == null ? ""
+    : u.checkout_behind ? `Your checkout is ${commits(u.checkout_behind)} behind${onBranch()}.`
+    : "Your checkout has the newest code.";
+  return `${launcher} ${game} ${checkout}`.trim();
 }
 
 /** The ways to get a newer Leonida for the build in use, as buttons for the detail pane. */
@@ -230,8 +237,13 @@ function buildActions(withPick) {
   if (u.game === "behind") html += btn("installBuild", getting || `Update to build ${u.newest}`, "warm", busy);
   if (u.game === "ahead") html += btn("installBuild", getting || `Switch to build ${u.newest}`, "ghost", busy);
   if (u.game === "own" || u.game === "old") {
-    html += btn("installBuild", getting || "Use ready-made builds", "warm", busy);
-    if (u.checkout) html += btn("updateCheckout", ui.busy === "checkout" ? "Asking..." : "Update my checkout", "ghost", busy);
+    const behind = u.checkout && u.checkout_behind > 0;
+    const checkout = btn("updateCheckout", ui.busy === "checkout" ? "Asking..." : "Update my checkout", behind ? "warm" : "ghost", busy);
+    if (behind) html += checkout;
+    html += btn("installBuild", getting || "Use ready-made builds", behind ? "ghost" : "warm", busy);
+    if (u.checkout && !behind) html += checkout;
+  } else if (checkoutNews()) {
+    html += btn("updateCheckout", ui.busy === "checkout" ? "Asking..." : "Update my checkout", "warm", busy);
   }
   if (withPick) html += btn("pickLeonida", "Pick another leonida.exe", "ghost", installing() ? " disabled" : "");
   if (showPrevious()) html += link("usePrevious", previousLabel(), busy);
@@ -259,8 +271,13 @@ function renderAbout() {
   let have = esc(V.has_exe ? u.have : "None yet");
   if (u.game === "behind") have += `. Build ${u.newest} is out: ` + a("installBuild", ui.busy === "leonida" ? "Downloading..." : "Update");
   if (u.game === "ahead") have += `. Newest ready-made: ${u.newest}. ` + a("installBuild", `Switch to build ${u.newest}`);
+  const behind = u.checkout && u.checkout_behind > 0 ? `. ${esc(commits(u.checkout_behind) + onBranch())}: ` : "";
   if (u.game === "own" || u.game === "old") {
-    have += ". " + a("installBuild", "Use ready-made builds") + (u.checkout ? " or " + a("updateCheckout", "Update my checkout") : "");
+    have += behind
+      ? behind + a("updateCheckout", "Update my checkout") + " or " + a("installBuild", "use ready-made builds")
+      : ". " + a("installBuild", "Use ready-made builds") + (u.checkout ? " or " + a("updateCheckout", "Update my checkout") : "");
+  } else if (checkoutNews()) {
+    have += behind + a("updateCheckout", "Update my checkout");
   }
   if (showPrevious()) have += `<span class="arow-note">${a("usePrevious", previousLabel())}</span>`;
   if (u.warm) have += `<span class="arow-note">New build: warm up the shaders once before you play.</span>`;
@@ -284,7 +301,7 @@ function heroState() {
   if (ui.hero === "game") return ui.found.length ? "pick" : "game";
   // An update row explains itself in the pane while the highlight bar is on it.
   if (ui.hl === "launcherNews" && bothNews()) return "bothNews";
-  if ((ui.hl === "launcherNews" && launcherNews()) || (ui.hl === "buildNews" && buildNews())) return ui.hl;
+  if ((ui.hl === "launcherNews" && launcherNews()) || (ui.hl === "buildNews" && (buildNews() || checkoutNews()))) return ui.hl;
   if (!V.has_game) return ui.found.length ? "pick" : "game";
   if (!V.has_exe) return "leonida";
   if (ui.running) return "running";
@@ -428,6 +445,14 @@ function renderHero() {
       btn("laterLauncher", "Later") +
       link("launcherPage", "What's new");
     facts = [["You have", u.launcher], ["Newest", u.launcher_new]];
+  } else if (state === "buildNews" && !buildNews()) {
+    const u = U();
+    title = `${commits(u.checkout_behind)}${onBranch()}`;
+    text = "Your leonida.exe is built from your own checkout, and git found newer code for it. Update my checkout " +
+      "opens a window that gets it with git pull and builds leonida.exe with cargo, which takes a few minutes. If " +
+      "you edited files there, it stops and changes nothing. Warm up the shaders once after it is done.";
+    actions = buildActions(false);
+    facts = [["Branch", u.checkout_branch || "Not on a branch"], ["New commits", String(u.checkout_behind)]];
   } else if (state === "buildNews") {
     const u = U();
     title = `Leonida build ${u.newest} is out`;
@@ -459,7 +484,9 @@ function renderHero() {
   } else if (state === "exeInfo") {
     const u = U();
     title = "Leonida Legacy";
-    const update = u.checkout ? "Switch to the ready-made builds, or update your checkout to the newest code."
+    const update = u.checkout && u.checkout_behind > 0
+      ? `Your checkout is ${commits(u.checkout_behind)} behind${onBranch()}: update it, or switch to the ready-made builds.`
+      : u.checkout ? "Switch to the ready-made builds, or update your checkout to the newest code."
       : "Switch to the ready-made builds to get the newest one.";
     text = {
       behind: `Build ${u.have_build}. Build ${u.newest} is out. START runs the build you have until you update.`,
@@ -582,10 +609,14 @@ function renderTiles() {
       ui.busy === "launcher" ? "Updating..." : "Update", "warn");
   }
   const buildRow = $("buildNews");
-  buildRow.hidden = !buildNews() || bothNews();
-  if (!buildRow.hidden) {
+  buildRow.hidden = !(buildNews() || checkoutNews()) || bothNews();
+  if (!buildRow.hidden && buildNews()) {
     menuRow("buildNews", `LEONIDA BUILD ${u.newest} IS OUT`, `You have build ${u.have_build}. Download ${u.newest_size}.`,
       "Update", "warn");
+  } else if (!buildRow.hidden) {
+    menuRow("buildNews", `${commits(u.checkout_behind).toUpperCase()} FOR YOUR CHECKOUT`,
+      `Your own build${onBranch()}. Update pulls them and builds leonida.exe.`,
+      ui.busy === "checkout" ? "Asking..." : "Update", "warn");
   }
 
   const warm = $("warmTile");
