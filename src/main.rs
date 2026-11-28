@@ -566,8 +566,12 @@ async fn is_running() -> bool {
     spawn_blocking(leonida::running).await.unwrap_or(false)
 }
 
+/// What the console window runs after leonida.exe stopped with an error: it keeps the window open.
+const STOPPED: &str =
+    "(echo. & echo leonida.exe stopped with an error. The lines above say why. & pause)";
+
 /// Starts leonida.exe to play (`what` = "play") or to warm up the shaders ("warm") in a new
-/// console window, which stays open with the log after the run ends.
+/// console window. It closes when the run ends well and stays open with the log after an error.
 #[tauri::command]
 async fn launch(
     state: State<'_, Shared>,
@@ -600,9 +604,10 @@ async fn launch(
         return Err("The game is already running. Close it before you start it again.".into());
     }
     let exe = launcher.exe();
-    // cmd /k keeps the window, and leonida.exe's log in it, open after the run ends.
+    // The window closes when leonida.exe ends well. After an error it stays open with the log
+    // until a key is pressed, so the player can read why.
     let spawned = Command::new(pc::windows_tool("cmd.exe"))
-        .raw_arg(format!("/k \"\"{}\" {args}\"", exe.display()))
+        .raw_arg(format!("/c \"\"{}\" {args} || {STOPPED}\"", exe.display()))
         .current_dir(leonida::folder(&exe))
         .envs(launcher.run().env())
         .creation_flags(CREATE_NEW_CONSOLE)
@@ -754,7 +759,8 @@ fn open_tests() -> Result<(), String> {
 }
 
 /// Asks GitHub for the newest launcher and Leonida build (at most once an hour unless `now`) and
-/// leonida.exe which build it is. Off the UI thread: up to 15 s without network.
+/// leonida.exe which build it is. When leonida.exe was built in a git checkout, git also fetches
+/// there and counts the new commits. Off the UI thread: up to 30 s without network.
 #[tauri::command]
 async fn check_updates(state: State<'_, Shared>, now: bool) -> Result<View, String> {
     // Asked while an unasked check runs: wait for it, so the answer shown is a new one.
@@ -767,7 +773,7 @@ async fn check_updates(state: State<'_, Shared>, now: bool) -> Result<View, Stri
             .await
             .map_err(stopped)?;
     }
-    let (saved, exe, look) = {
+    let (saved, exe, look, checkout) = {
         let mut launcher = lock(&state);
         let exe = launcher.exe();
         let due = update::due(launcher.updates.saved.checked, update::now(), now);
@@ -776,16 +782,33 @@ async fn check_updates(state: State<'_, Shared>, now: bool) -> Result<View, Stri
             return Ok(launcher.view());
         }
         launcher.updates.checking = true;
-        (due.then(|| launcher.updates.saved.clone()), exe, look)
+        let checkout = Some(leonida::folder(&exe))
+            .filter(|folder| launcher.has_exe() && update::is_checkout(folder).is_ok());
+        (
+            due.then(|| launcher.updates.saved.clone()),
+            exe,
+            look,
+            checkout,
+        )
     };
     let found = spawn_blocking(move || {
-        let have = look.then(|| (update::stamp(&exe), update::installed(&exe)));
-        (have, saved.map(update::check))
+        std::thread::scope(|scope| {
+            let behind = checkout.map(|folder| {
+                scope.spawn(move || {
+                    let count = update::checkout_behind(&folder);
+                    (folder, count)
+                })
+            });
+            let have = look.then(|| (update::stamp(&exe), update::installed(&exe)));
+            let checked = saved.map(update::check);
+            let behind = behind.and_then(|thread| thread.join().ok());
+            (have, checked, behind)
+        })
     })
     .await;
     let mut launcher = lock(&state);
     launcher.updates.checking = false;
-    let (have, checked) = found.map_err(stopped)?;
+    let (have, checked, behind) = found.map_err(stopped)?;
     if let Some((of, have)) = have {
         launcher.updates.have = have;
         launcher.updates.have_of = Some(of);
@@ -793,6 +816,9 @@ async fn check_updates(state: State<'_, Shared>, now: bool) -> Result<View, Stri
     if let Some((saved, miss)) = checked {
         launcher.updates.saved = saved;
         launcher.updates.miss = miss;
+    }
+    if behind.is_some() {
+        launcher.updates.behind = behind;
     }
     Ok(launcher.view())
 }

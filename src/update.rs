@@ -1137,12 +1137,18 @@ pub fn tidy_builds(keep: &[&Path]) {
 }
 
 const CHECKOUT_SCRIPT: &str = r#"$Host.UI.RawUI.WindowTitle = 'Updating Leonida Legacy'
+# After a problem the window waits, so the lines above it can be read. When it worked, it closes.
+function Stop-Here {
+  Write-Host ''
+  Read-Host 'Press Enter to close this window'
+  exit 1
+}
 Write-Host "Updating Leonida Legacy in $((Get-Location).Path)"
 Write-Host ''
 foreach ($tool in 'git', 'cargo') {
   if (-not (Get-Command $tool -ErrorAction SilentlyContinue)) {
     Write-Host "$tool isn't installed, so this can't update. The build steps say how to get it." -ForegroundColor Yellow
-    return
+    Stop-Here
   }
 }
 $branch = git branch --show-current
@@ -1155,20 +1161,22 @@ git diff-index --quiet HEAD --
 if ($LASTEXITCODE -ne 0) {
   Write-Host 'Some files in this folder were edited, so nothing was changed.' -ForegroundColor Yellow
   Write-Host 'git status lists them. Keep or undo your edits, then try again.'
-  return
+  Stop-Here
 }
 git pull --ff-only
 if ($LASTEXITCODE -ne 0) {
   Write-Host 'git pull stopped and changed nothing. The lines above say why.' -ForegroundColor Yellow
-  return
+  Stop-Here
 }
 cargo build --release -p leonida
 if ($LASTEXITCODE -ne 0) {
   Write-Host 'The build stopped. The lines above say why.' -ForegroundColor Yellow
-  return
+  Stop-Here
 }
 Write-Host ''
 Write-Host 'Done. Warm up the shaders in the launcher once before you play: a new build translates them again.' -ForegroundColor Green
+Write-Host 'This window closes in 10 seconds.'
+Start-Sleep -Seconds 10
 "#;
 
 pub fn is_checkout(folder: &Path) -> Result<(), String> {
@@ -1198,8 +1206,9 @@ pub fn branch(checkout: &Path) -> Option<String> {
 }
 
 /// Opens a PowerShell window in `checkout` that pulls the newest code (only as a fast-forward,
-/// and only when no tracked file was edited) and builds leonida.exe. The window stays open. The
-/// script runs from a file: antivirus watches for encoded command lines.
+/// and only when no tracked file was edited) and builds leonida.exe. The window closes by itself
+/// when that worked and waits for Enter after a problem. The script runs from a file: antivirus
+/// watches for encoded command lines.
 pub fn update_checkout(checkout: &Path) -> Result<(), String> {
     is_checkout(checkout)?;
     let script = data_dir()
@@ -1213,7 +1222,7 @@ pub fn update_checkout(checkout: &Path) -> Result<(), String> {
     fs::write(&script, text)
         .map_err(|error| format!("Couldn't write {} ({error}).", script.display()))?;
     Command::new(windows_tool(r"WindowsPowerShell\v1.0\powershell.exe"))
-        .args(["-NoLogo", "-NoProfile", "-NoExit"])
+        .args(["-NoLogo", "-NoProfile"])
         .args(["-ExecutionPolicy", "Bypass", "-File"])
         .arg(&script)
         .current_dir(checkout)
@@ -1221,6 +1230,55 @@ pub fn update_checkout(checkout: &Path) -> Result<(), String> {
         .spawn()
         .map(drop)
         .map_err(|error| format!("Couldn't open PowerShell ({error})."))
+}
+
+/// git with `args` in `checkout`, hidden, never asking for a password and stopped after
+/// `seconds`: what it printed, when it ended well.
+fn git(checkout: &Path, args: &[&str], seconds: u64) -> Option<String> {
+    let mut child = Command::new("git")
+        .arg("-C")
+        .arg(checkout)
+        .args(args)
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .env("GCM_INTERACTIVE", "never")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .creation_flags(CREATE_NO_WINDOW)
+        .spawn()
+        .ok()?;
+    let started = Instant::now();
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) if started.elapsed() < Duration::from_secs(seconds) => {
+                thread::sleep(Duration::from_millis(100));
+            }
+            _ => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return None;
+            }
+        }
+    };
+    let mut text = String::new();
+    child.stdout.take()?.read_to_string(&mut text).ok()?;
+    status.success().then_some(text)
+}
+
+/// How many commits the branch of `checkout` is behind the branch it pulls from, or None without
+/// git or that branch. Without network the count is from the last fetch that worked.
+pub fn checkout_behind(checkout: &Path) -> Option<u32> {
+    let _ = git(checkout, &["fetch", "--quiet", "--no-tags"], 20);
+    parse_count(&git(
+        checkout,
+        &["rev-list", "--count", "HEAD..@{upstream}"],
+        10,
+    )?)
+}
+
+fn parse_count(text: &str) -> Option<u32> {
+    text.trim().parse().ok()
 }
 
 /// What the launcher knows about updates while it runs.
@@ -1235,6 +1293,8 @@ pub struct Updates {
     pub checking: bool,
     /// "launcher" or "leonida" while that is being downloaded.
     pub busy: &'static str,
+    /// A checkout and how many commits it is behind, from the last check.
+    pub behind: Option<(PathBuf, Option<u32>)>,
 }
 
 impl Updates {
@@ -1261,6 +1321,8 @@ impl Updates {
         let previous = Path::new(&settings.previous_leonida);
         let has_previous = !settings.previous_leonida.is_empty() && previous.is_file();
         let exe = Path::new(&settings.leonida_exe);
+        let folder = crate::leonida::folder(exe);
+        let checkout = has_exe && is_checkout(&folder).is_ok();
         UpdatesView {
             launcher: VERSION,
             launcher_later: answered_later(&launcher_new, &settings.later_launcher),
@@ -1308,7 +1370,16 @@ impl Updates {
             } else {
                 0
             },
-            checkout: has_exe && is_checkout(&crate::leonida::folder(exe)).is_ok(),
+            checkout,
+            checkout_behind: match &self.behind {
+                Some((of, count)) if checkout && *of == folder => *count,
+                _ => None,
+            },
+            checkout_branch: if checkout {
+                branch(&folder).unwrap_or_default()
+            } else {
+                String::new()
+            },
             checked: self.saved.checked,
             note: self.miss.map(check_note).unwrap_or_default(),
             checking: self.checking,
@@ -1345,6 +1416,11 @@ pub struct UpdatesView {
     pub previous_build: u64,
     /// Whether the leonida.exe in use was built in a git checkout, which can be updated.
     pub checkout: bool,
+    /// How many commits that checkout is behind the branch it pulls from, or None when git
+    /// couldn't tell.
+    pub checkout_behind: Option<u32>,
+    /// The branch it is on, or empty.
+    pub checkout_branch: String,
     /// When GitHub was last asked, in seconds since 1970, or 0.
     pub checked: u64,
     pub note: String,
@@ -1380,6 +1456,22 @@ mod tests {
             r#"{{"name": "{name}", "size": 4194304, "digest": {digest},
                 "browser_download_url": "{url}"}}"#
         )
+    }
+
+    #[test]
+    fn commit_count_from_git() {
+        assert_eq!(parse_count("3\n"), Some(3));
+        assert_eq!(parse_count("0"), Some(0));
+        assert_eq!(parse_count(""), None);
+        assert_eq!(parse_count("fatal: no upstream configured"), None);
+    }
+
+    #[test]
+    fn no_commit_count_outside_a_checkout() {
+        let dir = env::temp_dir().join("leonida-launcher-not-a-checkout");
+        fs::create_dir_all(&dir).unwrap();
+        assert_eq!(checkout_behind(&dir), None);
+        fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
