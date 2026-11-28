@@ -157,6 +157,7 @@ mod tests {
             name: name.into(),
             opt_in: true,
             measured: String::new(),
+            about: String::new(),
             local: false,
             matcher: Default::default(),
         }

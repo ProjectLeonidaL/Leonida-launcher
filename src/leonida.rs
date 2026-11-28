@@ -12,6 +12,8 @@ pub struct Profile {
     pub name: String,
     pub opt_in: bool,
     pub measured: String,
+    /// What it does in plain words, from launcher-switches.json; empty when it has none.
+    pub about: String,
     pub local: bool,
     #[serde(rename = "match")]
     pub matcher: Matcher,
@@ -209,6 +211,7 @@ pub fn profiles(folder: &Path, downloaded: Option<&str>) -> Vec<Profile> {
                 name,
                 opt_in,
                 measured,
+                about: String::new(),
                 local,
                 matcher,
             });

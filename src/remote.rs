@@ -57,11 +57,20 @@ pub struct Wanted {
     pub why: String,
 }
 
+/// A profile from gpu-profiles.json in plain words.
+#[derive(Clone, Serialize, Deserialize)]
+pub struct ProfileAbout {
+    pub name: String,
+    pub about: String,
+}
+
 #[derive(Deserialize)]
-struct SwitchList {
-    switches: Vec<Switch>,
+pub struct SwitchList {
+    pub switches: Vec<Switch>,
     #[serde(default)]
-    wanted: Vec<Wanted>,
+    pub wanted: Vec<Wanted>,
+    #[serde(default)]
+    pub profiles: Vec<ProfileAbout>,
 }
 
 /// Where a list came from, for the window.
@@ -175,6 +184,7 @@ pub fn cause(miss: Miss, what: &str, using: &str, later: &str) -> String {
 pub struct Lists {
     pub switches: Vec<Switch>,
     pub wanted: Vec<Wanted>,
+    pub profile_abouts: Vec<ProfileAbout>,
     pub switches_from: Origin,
     /// gpu-profiles.json from GitHub or its last download, when there is one.
     pub profiles: Option<String>,
@@ -286,12 +296,12 @@ fn parse_list(text: &str) -> Option<SwitchList> {
     Some(list)
 }
 
-pub fn built_in() -> (Vec<Switch>, Vec<Wanted>) {
-    let list = parse_list(BUILT_IN_SWITCHES).unwrap_or(SwitchList {
+pub fn built_in() -> SwitchList {
+    parse_list(BUILT_IN_SWITCHES).unwrap_or(SwitchList {
         switches: Vec::new(),
         wanted: Vec::new(),
-    });
-    (list.switches, list.wanted)
+        profiles: Vec::new(),
+    })
 }
 
 /// Downloads both lists side by side. Blocks for up to 10 s without network, so call it off
@@ -311,8 +321,8 @@ pub fn load() -> Lists {
             .unwrap_or_else(|_| (None, Origin::built_in(Some(Miss::Other(-1)))));
         (switches, profiles)
     });
-    let (switches, wanted) = match text.as_deref().and_then(parse_list) {
-        Some(list) => (list.switches, list.wanted),
+    let list = match text.as_deref().and_then(parse_list) {
+        Some(list) => list,
         None => {
             switches_from.source = Source::BuiltIn;
             switches_from.tag = "built-in".into();
@@ -320,8 +330,9 @@ pub fn load() -> Lists {
         }
     };
     Lists {
-        switches,
-        wanted,
+        switches: list.switches,
+        wanted: list.wanted,
+        profile_abouts: list.profiles,
         switches_from,
         profiles,
         profiles_from,
@@ -334,12 +345,22 @@ mod tests {
 
     #[test]
     fn built_in_list_parses() {
-        assert!(!built_in().0.is_empty());
+        assert!(!built_in().switches.is_empty());
     }
 
     #[test]
     fn built_in_switches_have_plain_names_and_known_risks() {
-        let (switches, wanted) = built_in();
+        let SwitchList {
+            switches,
+            wanted,
+            profiles,
+        } = built_in();
+        for profile in &profiles {
+            assert!(
+                !profile.name.is_empty() && !profile.about.is_empty(),
+                "a profile entry needs a name and an about"
+            );
+        }
         for switch in &switches {
             assert!(!switch.title.is_empty(), "{} has no title", switch.name);
             assert!(

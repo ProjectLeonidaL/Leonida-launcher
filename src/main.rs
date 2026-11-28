@@ -24,7 +24,7 @@ use tauri::async_runtime::spawn_blocking;
 use tauri::{Manager, State, WindowEvent};
 
 use leonida::Profile;
-use remote::{Origin, Source, Switch, Wanted};
+use remote::{Origin, ProfileAbout, Source, Switch, Wanted};
 use run::{PLAY, Run, WARM_UP};
 use settings::Settings;
 
@@ -129,6 +129,7 @@ struct Launcher {
     game_name: String,
     switches: Vec<Switch>,
     wanted: Vec<Wanted>,
+    profile_abouts: Vec<ProfileAbout>,
     switches_from: Origin,
     downloaded_profiles: Option<String>,
     profiles_from: Origin,
@@ -180,12 +181,13 @@ impl Launcher {
             settings.leonida_exe = exe.display().to_string();
         }
         let game_name = game_dir::game_name(Path::new(&settings.game_dir));
-        let (switches, wanted) = remote::built_in();
+        let list = remote::built_in();
         let mut launcher = Self {
             settings,
             game_name,
-            switches,
-            wanted,
+            switches: list.switches,
+            wanted: list.wanted,
+            profile_abouts: list.profiles,
             switches_from: Origin::built_in(None),
             downloaded_profiles: None,
             profiles_from: Origin::built_in(None),
@@ -229,6 +231,11 @@ impl Launcher {
     fn reload_profiles(&mut self) {
         let folder = leonida::folder(&self.exe());
         self.profiles = leonida::profiles(&folder, self.downloaded_profiles.as_deref());
+        for profile in &mut self.profiles {
+            if let Some(plain) = self.profile_abouts.iter().find(|p| p.name == profile.name) {
+                profile.about.clone_from(&plain.about);
+            }
+        }
     }
 
     fn save(&self) -> Result<(), String> {
@@ -554,6 +561,7 @@ async fn refresh_lists(state: State<'_, Shared>) -> Result<View, String> {
     let mut launcher = lock(&state);
     launcher.switches = lists.switches;
     launcher.wanted = lists.wanted;
+    launcher.profile_abouts = lists.profile_abouts;
     launcher.switches_from = lists.switches_from;
     launcher.downloaded_profiles = lists.profiles;
     launcher.profiles_from = lists.profiles_from;
