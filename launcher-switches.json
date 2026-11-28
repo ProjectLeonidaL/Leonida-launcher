@@ -4,7 +4,8 @@
     "name: the switch without LEONIDA_. values: the choices besides default (default sets nothing). title: the switch in plain words, shown above its name. about: shown under it, in words for someone who doesn't code: what they would notice and when to change it. risk: safe, experimental or may crash, only when a measurement shows it; leave it empty otherwise. build: the branch a switch needs while it is not on main, empty once merged.",
     "title and risk are new; launchers older than them ignore both.",
     "test: speed or crash, the guided test a switch suits in Test a setting. speed compares two short runs; crash checks whether turning a switch off stops a game that keeps stopping. Without test, the switch isn't offered there. default: the value Leonida uses when the switch isn't set, when that is also in values; Test a setting doesn't offer it.",
-    "wanted: tests the maintainers ask for, first fitting one first. switch or profile names what (a profile from gpu-profiles.json), value which value, match the cards in gpu-profiles.json's form (empty: every card), why one sentence shown to the player. Launchers older than these fields ignore them."
+    "wanted: tests the maintainers ask for, first fitting one first. switch or profile names what (a profile from gpu-profiles.json), value which value, match the cards in gpu-profiles.json's form (empty: every card), why one sentence shown to the player. Launchers older than these fields ignore them.",
+    "profiles: one or two sentences per profile in gpu-profiles.json, in words for someone who doesn't code: what it changes and who it helped. Shown when the player points at the profile, with its measured figures below under Advanced. Launchers older than this field ignore it."
   ],
   "wanted": [
     {
@@ -130,6 +131,28 @@
       "risk": "",
       "build": "",
       "test": "crash"
+    }
+  ],
+  "profiles": [
+    {
+      "name": "nvidia-8gb",
+      "about": "For NVIDIA cards with 8 GB. Gives textures more room to load and shows frames without waiting for the last one. It made one 8 GB card much smoother; another saw no change."
+    },
+    {
+      "name": "nvidia-code-tables",
+      "about": "For NVIDIA cards. Lets the card build a few effects it refused before. It isn't meant to make the game faster."
+    },
+    {
+      "name": "readback-order",
+      "about": "Makes the game wait for finished results when it reads back from the graphics card, instead of sometimes getting old ones. How much it slows the game isn't measured yet."
+    },
+    {
+      "name": "card-windows",
+      "about": "Keeps more on the graphics card for faster frames, but it takes about 3.7 GB of the card's memory and some textures stay black. Only for testing."
+    },
+    {
+      "name": "texture-keep",
+      "about": "Keeps textures on the graphics card instead of making them again. Faster on a 12 GB card, no change on a 16 GB card."
     }
   ]
 }

@@ -678,8 +678,8 @@ function switchRows(list) {
 
 function chip(p, picked) {
   const on = picked.has(p.name);
-  const measured = p.measured ? ` data-measured="${esc(p.measured)}" title="${esc(p.measured)}"` : "";
-  return `<button type="button" class="pchip" data-profile="${esc(p.name)}" data-key="p:${esc(p.name)}" aria-pressed="${on}"${measured}>` +
+  const text = (p.about ? ` data-about="${esc(p.about)}"` : "") + (p.measured ? ` data-measured="${esc(p.measured)}"` : "");
+  return `<button type="button" class="pchip" data-profile="${esc(p.name)}" data-key="p:${esc(p.name)}" aria-pressed="${on}"${text}>` +
     `<span class="box">${ICON.check}</span>${esc(p.name)}</button>`;
 }
 
@@ -699,7 +699,7 @@ function renderProfiles() {
     : "Sets of switches measured on real cards. Leonida already turns on the ones that match your card. Tick one to choose yourself.";
   const groups = [
     ["Picked by your card", (p) => !p.local && !p.opt_in, "Leonida turns these on by itself when they match your graphics card."],
-    ["Opt-in", (p) => !p.local && p.opt_in, "Off unless you tick them. Point at one to see what was measured."],
+    ["Opt-in", (p) => !p.local && p.opt_in, "Off unless you tick them. Point at one to see what it does."],
   ];
   let html = "";
   for (const [name, keep, note] of groups) {
@@ -2035,14 +2035,26 @@ document.addEventListener("focusout", (event) => {
 // pending change, and the file is a few hundred bytes.
 $("extra").addEventListener("input", () => changeOwn({ extra: $("extra").value }));
 
-// Opt-in figures: shown under the group while a chip is pointed at or focused.
+// A profile in plain words, then its figures under Advanced: shown under the group while its
+// chip is pointed at or focused.
 function showMeasured(event) {
   const chipEl = event.target.closest && event.target.closest(".pchip");
   const group = chipEl && chipEl.closest(".pgroup");
   if (!group) return;
   const note = group.querySelector(".pnote");
+  const { about, measured } = chipEl.dataset;
   const enter = event.type === "mouseover" || event.type === "focusin";
-  note.textContent = enter && chipEl.dataset.measured ? chipEl.dataset.measured : note.dataset.note;
+  if (!enter || !(about || measured)) {
+    note.textContent = note.dataset.note;
+    return;
+  }
+  note.textContent = about || "";
+  if (measured) {
+    const more = document.createElement("span");
+    more.className = "pnote-more";
+    more.textContent = `Advanced: ${measured}`;
+    note.append(more);
+  }
 }
 for (const type of ["mouseover", "mouseout", "focusin", "focusout"]) document.addEventListener(type, showMeasured);
 

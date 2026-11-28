@@ -1441,6 +1441,7 @@ mod tests {
                 name: "nvidia-8gb".into(),
                 opt_in: true,
                 measured: String::new(),
+                about: String::new(),
                 local: false,
                 matcher: eight,
             }],
